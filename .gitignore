@@ -1,0 +1,10 @@
+# Sources de V8 (dépôts git à part, récupérés par j1\fetch.ps1) et jonction vers LLVM
+/v8/
+/toolchains/
+
+# Sorties de build
+out/
+/sonde/rust/target/
+
+# Certificat de développement : clé privée locale, recréée par sonde\build.ps1
+/sonde/certs/

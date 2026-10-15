@@ -1,0 +1,799 @@
+diff --git a/src/base/debug/stack_trace_win.cc b/src/base/debug/stack_trace_win.cc
+index f981bec..5c867ac 100644
+--- a/src/base/debug/stack_trace_win.cc
++++ b/src/base/debug/stack_trace_win.cc
+@@ -207,6 +207,12 @@ void StackTrace::InitTrace(const CONTEXT* context_record) {
+ #else
+ #error Unsupported Arch
+ #endif
++#elif defined(_M_ARM)
++  // Rhénium : Windows ARM32 (Thumb-2), R11 sert de pointeur de cadre.
++  int machine_type = IMAGE_FILE_MACHINE_ARMNT;
++  stack_frame.AddrPC.Offset = context_record->Pc;
++  stack_frame.AddrFrame.Offset = context_record->R11;
++  stack_frame.AddrStack.Offset = context_record->Sp;
+ #else
+   int machine_type = IMAGE_FILE_MACHINE_I386;
+   stack_frame.AddrPC.Offset = context_record->Eip;
+diff --git a/src/base/immediate-crash.h b/src/base/immediate-crash.h
+index ce6240b..008bc6d 100644
+--- a/src/base/immediate-crash.h
++++ b/src/base/immediate-crash.h
+@@ -92,6 +92,13 @@
+ #define TRAP_SEQUENCE1_() __debugbreak()
+ #define TRAP_SEQUENCE2_()
+ 
++#elif V8_HOST_ARCH_ARM
++
++// Rhénium : Windows ARM32 (Thumb-2). __debugbreak() émet le point d'arrêt
++// Windows ; udf termine le processus s'il est ignoré.
++#define TRAP_SEQUENCE1_() __debugbreak()
++#define TRAP_SEQUENCE2_() asm volatile("udf #0")
++
+ #elif V8_HOST_ARCH_ARM64
+ 
+ // Windows ARM64 uses "BRK #F000" as its breakpoint instruction, and
+diff --git a/src/base/platform/platform-win32.cc b/src/base/platform/platform-win32.cc
+index 152fbbf..ff79a5b 100644
+--- a/src/base/platform/platform-win32.cc
++++ b/src/base/platform/platform-win32.cc
+@@ -24,6 +24,7 @@
+ #include <mmsystem.h>  // For timeGetTime().
+ #include <tlhelp32.h>  // For Module32First and al.
+ 
++#include <atomic>  // Rhénium : pages de code (WaitForCodePage)
+ #include <limits>
+ 
+ #include "src/base/bits.h"
+@@ -867,6 +868,160 @@ DWORD GetFileViewAccessFromMemoryPermission(OS::MemoryPermission access) {
+   UNREACHABLE();
+ }
+ 
++#if V8_HOST_ARCH_ARM
++}  // namespace
++
++// Rhénium : Windows ARM32 utilise toujours l'AAPCS à flottants matériels.
++// static
++bool OS::ArmUsingHardFloat() { return true; }
++
++namespace {
++
++// Rhénium : Windows 10 Mobile (UWP, ARM32). Une app ne crée de mémoire
++// exécutable que par VirtualAllocFromApp/VirtualProtectFromApp (capability
++// codeGeneration), qui refusent toute protection écriture+exécution, et
++// VirtualAllocFromApp refuse même l'exécution seule. On alloue donc sans
++// exécution puis on bascule la protection. V8 doit tourner avec
++// --no-write-code-using-rwx (W^X), sinon ses demandes RWX échouent ici.
++constexpr DWORD kExecuteProtections = PAGE_EXECUTE | PAGE_EXECUTE_READ |
++                                      PAGE_EXECUTE_READWRITE |
++                                      PAGE_EXECUTE_WRITECOPY;
++
++// Rhénium : JIT multi-thread sans page RWX.
++// En W^X (--write-protect-code-memory), V8 passe toute la zone d'objets d'une
++// page de code (MemoryChunk de 256 Ko) en RW le temps d'y écrire, sous le
++// mutex de cette page, puis la remet en RX. Si un autre thread exécute du code
++// de cette zone pendant ce temps (le thread principal pendant que le balayeur
++// concurrent, la compilation concurrente ou une tâche du GC y écrit), il prend
++// une violation d'exécution. Le gestionnaire d'exceptions vectorisé ci-dessous
++// fait patienter ce thread jusqu'au retour de la page en exécution, puis
++// reprend l'instruction fautive. Les écrivains se sérialisent déjà par page et
++// ne bloquent jamais sous ce mutex : l'attente dure quelques microsecondes.
++// (Un double mappage RW/RX demanderait de traduire chaque écriture de V8 dans
++// ses pages de code, dispersées dans le tas : voir j1\README.md.)
++
++// Un bit par page de 4 Ko de l'espace d'adressage 32 bits (128 Ko de .bss,
++// engagés à la demande) : vrai si V8 a rendu la page exécutable.
++constexpr uintptr_t kCodePageShift = 12;
++std::atomic<uint32_t> code_pages[(uint64_t{1} << (32 - kCodePageShift)) / 32];
++
++bool IsCodePage(uintptr_t address) {
++  uintptr_t page = address >> kCodePageShift;
++  return code_pages[page / 32].load(std::memory_order_relaxed) &
++         (uint32_t{1} << (page % 32));
++}
++
++void MarkCodePages(void* address, size_t size, bool code) {
++  if (size == 0) return;
++  uintptr_t first = reinterpret_cast<uintptr_t>(address) >> kCodePageShift;
++  uintptr_t last =
++      (reinterpret_cast<uintptr_t>(address) + size - 1) >> kCodePageShift;
++  for (uintptr_t page = first; page <= last; ++page) {
++    uint32_t bit = uint32_t{1} << (page % 32);
++    if (code) {
++      code_pages[page / 32].fetch_or(bit, std::memory_order_relaxed);
++    } else {
++      code_pages[page / 32].fetch_and(~bit, std::memory_order_relaxed);
++    }
++  }
++}
++
++// Statistiques des attentes, lues par rhenium_wx_stats().
++std::atomic<uint32_t> wx_waits{0};
++std::atomic<uint64_t> wx_wait_ticks{0};
++std::atomic<uint64_t> wx_wait_max_ticks{0};
++
++LONG WINAPI WaitForCodePage(EXCEPTION_POINTERS* info) {
++  const EXCEPTION_RECORD* record = info->ExceptionRecord;
++  if (record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
++      record->NumberParameters < 2 ||
++      record->ExceptionInformation[0] != EXCEPTION_EXECUTE_FAULT) {
++    return EXCEPTION_CONTINUE_SEARCH;
++  }
++  uintptr_t address = record->ExceptionInformation[1];
++  if (!IsCodePage(address)) return EXCEPTION_CONTINUE_SEARCH;
++
++  LARGE_INTEGER frequency, start, now;
++  QueryPerformanceFrequency(&frequency);
++  QueryPerformanceCounter(&start);
++  for (int spin = 0;; ++spin) {
++    MEMORY_BASIC_INFORMATION region;
++    if (!VirtualQuery(reinterpret_cast<void*>(address), &region,
++                      sizeof(region)) ||
++        region.State != MEM_COMMIT || !IsCodePage(address)) {
++      return EXCEPTION_CONTINUE_SEARCH;  // page libérée : vraie faute
++    }
++    DWORD protect = region.Protect & 0xFF;
++    if (protect & kExecuteProtections) break;  // écriture finie : on reprend
++    // Une page de code n'est en RW que le temps d'une écriture de V8 ; toute
++    // autre protection signale une vraie faute.
++    if (protect != PAGE_READWRITE) return EXCEPTION_CONTINUE_SEARCH;
++    QueryPerformanceCounter(&now);
++    if (now.QuadPart - start.QuadPart > 10 * frequency.QuadPart) {
++      return EXCEPTION_CONTINUE_SEARCH;  // 10 s : écrivain bloqué, on abandonne
++    }
++    if (spin < 64) {
++      YieldProcessor();
++    } else {
++      Sleep(spin < 1024 ? 0 : 1);
++    }
++  }
++  QueryPerformanceCounter(&now);
++  uint64_t ticks = static_cast<uint64_t>(now.QuadPart - start.QuadPart);
++  wx_waits.fetch_add(1, std::memory_order_relaxed);
++  wx_wait_ticks.fetch_add(ticks, std::memory_order_relaxed);
++  uint64_t max = wx_wait_max_ticks.load(std::memory_order_relaxed);
++  while (ticks > max && !wx_wait_max_ticks.compare_exchange_weak(
++                            max, ticks, std::memory_order_relaxed)) {
++  }
++  return EXCEPTION_CONTINUE_EXECUTION;
++}
++
++void InstallCodePageWaiter() {
++  // Absente des en-têtes « app » : cherchée dans kernelbase, sans import.
++  static const bool installed = [] {
++    using AddVehFn = PVOID(WINAPI*)(ULONG, PVECTORED_EXCEPTION_HANDLER);
++    auto add = reinterpret_cast<AddVehFn>(
++        GetProcAddress(GetModuleHandleW(L"kernelbase.dll"),
++                       "AddVectoredExceptionHandler"));
++    // En tête de liste : ces fautes passagères n'ont pas à être vues ailleurs.
++    return add && add(1, &WaitForCodePage) != nullptr;
++  }();
++  USE(installed);
++}
++
++void* VirtualAllocWrapper(void* address, size_t size, DWORD flags,
++                          DWORD protect) {
++  protect &= ~PAGE_TARGETS_INVALID;  // pas de CFG dans l'app
++  if (!(protect & kExecuteProtections)) {
++    return VirtualAllocFromApp(address, size, flags, protect);
++  }
++  InstallCodePageWaiter();
++  ULONG old_protection;
++  // Pages déjà engagées (retour en RX après une écriture) : une seule bascule,
++  // sans repasser par RW.
++  if (flags == MEM_COMMIT && address != nullptr &&
++      VirtualProtectFromApp(address, size, protect, &old_protection)) {
++    MarkCodePages(address, size, true);
++    return address;
++  }
++  DWORD initial = (flags & MEM_COMMIT) ? PAGE_READWRITE : PAGE_NOACCESS;
++  void* result = VirtualAllocFromApp(address, size, flags, initial);
++  if (result == nullptr || !(flags & MEM_COMMIT)) return result;
++  if (!VirtualProtectFromApp(result, size, protect, &old_protection)) {
++    DWORD error = GetLastError();
++    if (flags & MEM_RESERVE) VirtualFree(result, 0, MEM_RELEASE);
++    SetLastError(error);
++    return nullptr;
++  }
++  MarkCodePages(result, size, true);
++  return result;
++}
++
++void ForgetCodePages(void* address, size_t size) {
++  MarkCodePages(address, size, false);
++}
++#else
+ void* VirtualAllocWrapper(void* address, size_t size, DWORD flags,
+                           DWORD protect) {
+   if (VirtualAlloc2) {
+@@ -877,6 +1032,9 @@ void* VirtualAllocWrapper(void* address, size_t size, DWORD flags,
+   }
+ }
+ 
++void ForgetCodePages(void* address, size_t size) {}
++#endif  // V8_HOST_ARCH_ARM
++
+ uint8_t* VirtualAllocWithHint(size_t size, DWORD flags, DWORD protect,
+                               void* hint) {
+   LPVOID base = VirtualAllocWrapper(hint, size, flags, protect);
+@@ -939,6 +1097,20 @@ void CheckIsOOMError(int error) {
+ 
+ }  // namespace
+ 
++#if V8_HOST_ARCH_ARM
++// Rhénium : attentes de WaitForCodePage depuis le démarrage (nombre, durée
++// cumulée et plus longue en millisecondes), lues par la sonde.
++extern "C" void rhenium_wx_stats(uint32_t* waits, double* total_ms,
++                                 double* max_ms) {
++  LARGE_INTEGER frequency;
++  QueryPerformanceFrequency(&frequency);
++  double ms_per_tick = 1000.0 / static_cast<double>(frequency.QuadPart);
++  *waits = wx_waits.load(std::memory_order_relaxed);
++  *total_ms = wx_wait_ticks.load(std::memory_order_relaxed) * ms_per_tick;
++  *max_ms = wx_wait_max_ticks.load(std::memory_order_relaxed) * ms_per_tick;
++}
++#endif  // V8_HOST_ARCH_ARM
++
+ // static
+ void* OS::Allocate(void* hint, size_t size, size_t alignment,
+                    MemoryPermission access) {
+@@ -961,6 +1133,7 @@ void OS::Free(void* address, size_t size) {
+   DCHECK_EQ(0, reinterpret_cast<uintptr_t>(address) % AllocatePageSize());
+   DCHECK_EQ(0, size % AllocatePageSize());
+   USE(size);
++  ForgetCodePages(address, size);  // Rhénium : voir WaitForCodePage
+   CHECK_NE(0, VirtualFree(address, 0, MEM_RELEASE));
+ }
+ 
+@@ -996,6 +1169,7 @@ void OS::FreeShared(void* address, size_t size) {
+ void OS::Release(void* address, size_t size) {
+   DCHECK_EQ(0, reinterpret_cast<uintptr_t>(address) % CommitPageSize());
+   DCHECK_EQ(0, size % CommitPageSize());
++  ForgetCodePages(address, size);  // Rhénium : voir WaitForCodePage
+   CHECK_NE(0, VirtualFree(address, size, MEM_DECOMMIT));
+ }
+ 
+@@ -1004,6 +1178,7 @@ bool OS::SetPermissions(void* address, size_t size, MemoryPermission access) {
+   DCHECK_EQ(0, reinterpret_cast<uintptr_t>(address) % CommitPageSize());
+   DCHECK_EQ(0, size % CommitPageSize());
+   if (access == MemoryPermission::kNoAccess) {
++    ForgetCodePages(address, size);  // Rhénium : voir WaitForCodePage
+     return VirtualFree(address, size, MEM_DECOMMIT) != 0;
+   }
+   DWORD protect = GetProtectionFromMemoryPermission(access);
+@@ -1022,7 +1197,16 @@ void OS::SetDataReadOnly(void* address, size_t size) {
+   DCHECK_EQ(0, size % CommitPageSize());
+ 
+   DWORD old_protection;
++#if V8_HOST_ARCH_ARM
++  // Rhénium : VirtualProtect est réservé au bureau ; une app UWP passe par
++  // VirtualProtectFromApp.
++  ULONG old_protection_app;
++  CHECK(VirtualProtectFromApp(address, size, PAGE_READONLY,
++                              &old_protection_app));
++  old_protection = old_protection_app;
++#else
+   CHECK(VirtualProtect(address, size, PAGE_READONLY, &old_protection));
++#endif
+   CHECK(old_protection == PAGE_READWRITE || old_protection == PAGE_WRITECOPY);
+ }
+ 
+@@ -1070,6 +1254,7 @@ bool OS::DecommitPages(void* address, size_t size) {
+   // https://docs.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc
+   // for MEM_COMMIT: "The function also guarantees that when the caller later
+   // initially accesses the memory, the contents will be zero."
++  ForgetCodePages(address, size);  // Rhénium : voir WaitForCodePage
+   return VirtualFree(address, size, MEM_DECOMMIT) != 0;
+ }
+ 
+@@ -1811,7 +1996,7 @@ Stack::StackSlot Stack::ObtainCurrentThreadStackStart() {
+ 
+ // static
+ Stack::StackSlot Stack::GetCurrentStackPosition() {
+-#if V8_CC_MSVC
++#if V8_CC_MSVC && !V8_HOST_ARCH_ARM  // Rhénium : clang n'a pas cet intrinsèque sur ARM32
+   return _AddressOfReturnAddress();
+ #else
+   return __builtin_frame_address(0);
+diff --git a/src/base/platform/time.cc b/src/base/platform/time.cc
+index b6da0a6..66bd04f 100644
+--- a/src/base/platform/time.cc
++++ b/src/base/platform/time.cc
+@@ -705,7 +705,7 @@ TimeTicks InitialTimeTicksNowFunction() {
+   return g_time_ticks_now_function();
+ }
+ 
+-#if V8_HOST_ARCH_ARM64
++#if V8_HOST_ARCH_ARM64 || V8_HOST_ARCH_ARM  // Rhénium : pas de TSC sur ARM32
+ // From MSDN, FILETIME "Contains a 64-bit value representing the number of
+ // 100-nanosecond intervals since January 1, 1601 (UTC)."
+ int64_t FileTimeToMicroseconds(const FILETIME& ft) {
+@@ -833,7 +833,7 @@ ThreadTicks ThreadTicks::Now() {
+ ThreadTicks ThreadTicks::GetForThread(const HANDLE& thread_handle) {
+   DCHECK(IsSupported());
+ 
+-#if V8_HOST_ARCH_ARM64
++#if V8_HOST_ARCH_ARM64 || V8_HOST_ARCH_ARM  // Rhénium : pas de TSC sur ARM32
+   // QueryThreadCycleTime versus TSCTicksPerSecond doesn't have much relation to
+   // actual elapsed time on Windows on Arm, because QueryThreadCycleTime is
+   // backed by the actual number of CPU cycles executed, rather than a
+@@ -871,12 +871,12 @@ bool ThreadTicks::IsSupportedWin() {
+ 
+ // static
+ void ThreadTicks::WaitUntilInitializedWin() {
+-#ifndef V8_HOST_ARCH_ARM64
++#if !V8_HOST_ARCH_ARM64 && !V8_HOST_ARCH_ARM  // Rhénium : pas de TSC sur ARM32
+   while (TSCTicksPerSecond() == 0) ::Sleep(10);
+ #endif
+ }
+ 
+-#ifndef V8_HOST_ARCH_ARM64
++#if !V8_HOST_ARCH_ARM64 && !V8_HOST_ARCH_ARM  // Rhénium : pas de TSC sur ARM32
+ double ThreadTicks::TSCTicksPerSecond() {
+   DCHECK(IsSupported());
+ 
+diff --git a/src/base/platform/time.h b/src/base/platform/time.h
+index 9a41d49..da34a92 100644
+--- a/src/base/platform/time.h
++++ b/src/base/platform/time.h
+@@ -493,7 +493,7 @@ class V8_BASE_EXPORT ThreadTicks final
+   explicit constexpr ThreadTicks(int64_t ticks) : TimeBase(ticks) {}
+ 
+ #if V8_OS_WIN
+-#if V8_HOST_ARCH_ARM64
++#if V8_HOST_ARCH_ARM64 || V8_HOST_ARCH_ARM  // Rhénium : pas de TSC sur ARM32
+   // TSCTicksPerSecond is not supported on Windows on Arm systems because the
+   // cycle-counting methods use the actual CPU cycle count, and not a consistent
+   // incrementing counter.
+diff --git a/src/codegen/arm/constants-arm.h b/src/codegen/arm/constants-arm.h
+index d8d52f1..cf44476 100644
+--- a/src/codegen/arm/constants-arm.h
++++ b/src/codegen/arm/constants-arm.h
+@@ -14,7 +14,9 @@
+ #include "src/utils/utils.h"
+ 
+ // ARM EABI is required.
+-#if defined(__arm__) && !defined(__ARM_EABI__)
++// Rhénium : Windows ARM32 ne définit pas __ARM_EABI__ mais suit l'AAPCS
++// avec flottants matériels (__ARM_PCS_VFP), comme Linux armhf.
++#if defined(__arm__) && !defined(__ARM_EABI__) && !defined(_WIN32)
+ #error ARM EABI support is required.
+ #endif
+ 
+diff --git a/src/codegen/arm/cpu-arm.cc b/src/codegen/arm/cpu-arm.cc
+index 6fc1dd9..38e666c 100644
+--- a/src/codegen/arm/cpu-arm.cc
++++ b/src/codegen/arm/cpu-arm.cc
+@@ -12,6 +12,10 @@
+ #include <sys/types.h>
+ #elif V8_OS_STARBOARD
+ #define __ARM_NR_cacheflush 0x0f0002
++#elif defined(_WIN32)
++// Rhénium : FlushInstructionCache. _WIN32 et non V8_OS_WIN, pas encore défini ici.
++#include "src/base/win32-headers.h"  // macros de V8 pour windows.h
++#include <windows.h>
+ #else
+ #include <sys/syscall.h>  // for cache flushing.
+ #endif
+@@ -34,6 +38,9 @@ V8_NOINLINE void CpuFeatures::FlushICache(void* start, size_t size) {
+   struct arm_sync_icache_args args = {
+       .addr = reinterpret_cast<uintptr_t>(start), .len = size};
+   sysarch(ARM_SYNC_ICACHE, reinterpret_cast<void*>(&args));
++#elif defined(_WIN32)
++  // Rhénium : Windows ARM32.
++  ::FlushInstructionCache(::GetCurrentProcess(), start, size);
+ #else
+   register uint32_t beg asm("r0") = reinterpret_cast<uint32_t>(start);
+   register uint32_t end asm("r1") = beg + size;
+diff --git a/src/codegen/arm/macro-assembler-arm.cc b/src/codegen/arm/macro-assembler-arm.cc
+index b264415..8d17389 100644
+--- a/src/codegen/arm/macro-assembler-arm.cc
++++ b/src/codegen/arm/macro-assembler-arm.cc
+@@ -1596,6 +1596,10 @@ void MacroAssembler::InvokePrologue(Register expected_parameter_count,
+     AllocateStackSpace(scratch);
+     mov(dest, sp);
+     mov(num, actual_parameter_count);
++    // Rhénium : sous Windows, AllocateStackSpace sonde la pile avec un cmp qui
++    // écrase les drapeaux ; le premier test de la boucle (b gt) ne doit pas
++    // reposer sur eux, sinon la copie des arguments est sautée.
++    cmp(num, Operand(0));
+     b(&check);
+     bind(&copy);
+     ldr(scratch, MemOperand(src, kSystemPointerSize, PostIndex));
+diff --git a/src/common/globals.h b/src/common/globals.h
+index ef9904f..7e94a34 100644
+--- a/src/common/globals.h
++++ b/src/common/globals.h
+@@ -275,6 +275,18 @@ const size_t kShortBuiltinCallsOldSpaceSizeThreshold = size_t{2} * GB;
+ #define V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT false
+ #endif
+ 
++// Rhénium : Windows 10 Mobile (ARM32) écrit le code en W^X par pages de 4 Ko.
++// CodePageMemoryModificationScope ne bascule alors en RW que les pages de
++// 4 Ko réellement écrites, et non toute la zone d'objets du MemoryChunk
++// (256 Ko) : le thread qui exécute du code attend bien moins souvent
++// (WaitForCodePage, base/platform/platform-win32.cc).
++#if defined(V8_OS_WIN) && defined(V8_HOST_ARCH_ARM) && \
++    !V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT
++#define RHENIUM_NARROW_CODE_WRITES true
++#else
++#define RHENIUM_NARROW_CODE_WRITES false
++#endif
++
+ // TODO(v8:13023): enable PKU support when we have a test coverage
+ #if V8_HAS_PKU_JIT_WRITE_PROTECT && \
+     !(defined(V8_COMPRESS_POINTERS) && !defined(V8_EXTERNAL_CODE_SPACE))
+diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
+index 3db3d7e..f959b73 100644
+--- a/src/execution/isolate.cc
++++ b/src/execution/isolate.cc
+@@ -168,7 +168,17 @@ namespace internal {
+ #endif
+ 
+ const uint8_t* DefaultEmbeddedBlobCode() {
++#if V8_OS_WIN && V8_TARGET_ARCH_ARM
++  // Rhénium : sous Windows ARM32, l'éditeur de liens ajoute le bit Thumb à toute
++  // adresse de symbole située dans une section exécutable. Le blob contient de
++  // l'A32 et commence sur 32 octets : on retire ce bit, sinon chaque appel de
++  // builtin basculerait en Thumb.
++  return reinterpret_cast<const uint8_t*>(
++      reinterpret_cast<uintptr_t>(v8_Default_embedded_blob_code_) &
++      ~uintptr_t{1});
++#else
+   return v8_Default_embedded_blob_code_;
++#endif
+ }
+ uint32_t DefaultEmbeddedBlobCodeSize() {
+   return v8_Default_embedded_blob_code_size_;
+diff --git a/src/heap/base/asm/arm/push_registers_asm.cc b/src/heap/base/asm/arm/push_registers_asm.cc
+index 5246c3f..8aadec2 100644
+--- a/src/heap/base/asm/arm/push_registers_asm.cc
++++ b/src/heap/base/asm/arm/push_registers_asm.cc
+@@ -18,8 +18,18 @@
+ // https://en.wikipedia.org/wiki/Calling_convention#ARM_(A32)
+ // http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.faqs/ka4127.html
+ asm(".globl PushAllRegistersAndIterateStack             \n"
++#ifdef _WIN32
++    // Rhénium : COFF Windows ARM32 (Thumb-2). Symbole de type fonction pour que
++    // son adresse porte le bit Thumb.
++    ".def PushAllRegistersAndIterateStack               \n"
++    ".scl 2                                             \n"
++    ".type 32                                           \n"
++    ".endef                                             \n"
++    ".thumb_func                                        \n"
++#else   // !_WIN32
+     ".type PushAllRegistersAndIterateStack, %function   \n"
+     ".hidden PushAllRegistersAndIterateStack            \n"
++#endif  // !_WIN32
+     "PushAllRegistersAndIterateStack:                   \n"
+     // Push all callee-saved registers and save return address.
+     // Only {r4-r11} are callee-saved registers. Push r3 in addition to align
+diff --git a/src/heap/factory.cc b/src/heap/factory.cc
+index 10c1847..1ffa22f 100644
+--- a/src/heap/factory.cc
++++ b/src/heap/factory.cc
+@@ -165,8 +165,11 @@ MaybeHandle<Code> Factory::CodeBuilder::BuildInternal(
+     {
+       DisallowGarbageCollection no_gc;
+       InstructionStream raw_istream = *istream;
+-      CodePageMemoryModificationScope memory_modification_scope(raw_istream);
+       int body_size = code_desc_.body_size();
++      // Rhénium : raw_istream.Size() n'est pas encore lisible (body_size).
++      CodePageMemoryModificationScope memory_modification_scope(
++          BasicMemoryChunk::FromHeapObject(raw_istream), raw_istream.address(),
++          InstructionStream::SizeFor(body_size));
+       ThreadIsolation::RegisterInstructionStreamAllocation(
+           raw_istream.address(), InstructionStream::SizeFor(body_size));
+       raw_istream.set_body_size(body_size);
+@@ -298,8 +301,10 @@ MaybeHandle<InstructionStream> Factory::CodeBuilder::AllocateInstructionStream(
+   // fact that no allocation will happen from this point on.
+   DisallowGarbageCollection no_gc;
+   {
++    // Rhénium : seule la carte est écrite, en tête de l'objet.
+     CodePageMemoryModificationScope memory_modification_scope(
+-        BasicMemoryChunk::FromHeapObject(result));
++        BasicMemoryChunk::FromHeapObject(result), result.address(),
++        kTaggedSize);
+     result.set_map_after_allocation(
+         *isolate_->factory()->instruction_stream_map(), SKIP_WRITE_BARRIER);
+   }
+@@ -327,8 +332,10 @@ Factory::CodeBuilder::AllocateConcurrentSparkplugInstructionStream(
+   // fact that no allocation will happen from this point on.
+   DisallowGarbageCollection no_gc;
+   {
++    // Rhénium : seule la carte est écrite, en tête de l'objet.
+     CodePageMemoryModificationScope memory_modification_scope(
+-        BasicMemoryChunk::FromHeapObject(result));
++        BasicMemoryChunk::FromHeapObject(result), result.address(),
++        kTaggedSize);
+     result.set_map_after_allocation(
+         *local_isolate_->factory()->instruction_stream_map(),
+         SKIP_WRITE_BARRIER);
+diff --git a/src/heap/free-list.cc b/src/heap/free-list.cc
+index f373921..131d0a7 100644
+--- a/src/heap/free-list.cc
++++ b/src/heap/free-list.cc
+@@ -56,8 +56,10 @@ FreeSpace FreeListCategory::SearchForNodeInList(size_t minimum_size,
+         set_top(cur_node.next());
+       }
+       if (!prev_non_evac_node.is_null()) {
++        // Rhénium : seul le début du FreeSpace (carte, taille, suivant) est écrit.
+         CodePageMemoryModificationScope code_modification_scope(
+-            BasicMemoryChunk::FromHeapObject(prev_non_evac_node));
++            BasicMemoryChunk::FromHeapObject(prev_non_evac_node),
++            prev_non_evac_node.address(), 4 * kTaggedSize);
+         prev_non_evac_node.set_next(cur_node.next());
+       }
+       *node_size = size;
+@@ -74,8 +76,9 @@ void FreeListCategory::Free(Address start, size_t size_in_bytes, FreeMode mode,
+   FreeSpace free_space = FreeSpace::cast(HeapObject::FromAddress(start));
+   DCHECK_EQ(free_space.Size(), size_in_bytes);
+   {
++    // Rhénium : seul le début du FreeSpace (carte, taille, suivant) est écrit.
+     CodePageMemoryModificationScope memory_modification_scope(
+-        BasicMemoryChunk::FromAddress(start));
++        BasicMemoryChunk::FromAddress(start), start, 4 * kTaggedSize);
+     free_space.set_next(top());
+   }
+   set_top(free_space);
+diff --git a/src/heap/heap-inl.h b/src/heap/heap-inl.h
+index 1f9c6db..eb8aa96 100644
+--- a/src/heap/heap-inl.h
++++ b/src/heap/heap-inl.h
+@@ -571,8 +571,16 @@ CodePageMemoryModificationScope::CodePageMemoryModificationScope(
+ #else
+ CodePageMemoryModificationScope::CodePageMemoryModificationScope(
+     InstructionStream code)
++#if RHENIUM_NARROW_CODE_WRITES
++    // Rhénium : l'objet doit être initialisé (body_size lu par Size()) ; sinon
++    // passer l'étendue explicitement.
++    : CodePageMemoryModificationScope(BasicMemoryChunk::FromHeapObject(code),
++                                      code.address(), code.Size()) {
++}
++#else
+     : CodePageMemoryModificationScope(BasicMemoryChunk::FromHeapObject(code)) {}
+ #endif
++#endif
+ 
+ #if V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT || V8_HEAP_USE_PKU_JIT_WRITE_PROTECT
+ CodePageMemoryModificationScope::CodePageMemoryModificationScope(
+@@ -581,16 +589,27 @@ CodePageMemoryModificationScope::CodePageMemoryModificationScope(
+     rwx_write_scope_.emplace("A part of CodePageMemoryModificationScope");
+   }
+ }
++
++CodePageMemoryModificationScope::CodePageMemoryModificationScope(
++    BasicMemoryChunk* chunk, Address start, size_t size)
++    : CodePageMemoryModificationScope(chunk) {}
+ #else
+ CodePageMemoryModificationScope::CodePageMemoryModificationScope(
+     BasicMemoryChunk* chunk)
++    : CodePageMemoryModificationScope(chunk, kNullAddress, 0) {}
++
++CodePageMemoryModificationScope::CodePageMemoryModificationScope(
++    BasicMemoryChunk* chunk, Address start, size_t size)
+     : chunk_(chunk),
++      start_(start),
++      size_(size),
+       scope_active_(chunk_->IsFlagSet(BasicMemoryChunk::IS_EXECUTABLE) &&
+                     chunk_->heap()->write_protect_code_memory()) {
+   if (scope_active_) {
+     DCHECK(chunk_->owner()->identity() == CODE_SPACE ||
+            (chunk_->owner()->identity() == CODE_LO_SPACE));
+-    guard_.emplace(MemoryChunk::cast(chunk_)->SetCodeModificationPermissions());
++    guard_.emplace(MemoryChunk::cast(chunk_)->SetCodeModificationPermissions(
++        start_, size_));
+   }
+ }
+ #endif
+@@ -598,7 +617,7 @@ CodePageMemoryModificationScope::CodePageMemoryModificationScope(
+ CodePageMemoryModificationScope::~CodePageMemoryModificationScope() {
+ #if !V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT && !V8_HEAP_USE_PKU_JIT_WRITE_PROTECT
+   if (scope_active_) {
+-    MemoryChunk::cast(chunk_)->SetDefaultCodePermissions();
++    MemoryChunk::cast(chunk_)->SetDefaultCodePermissions(start_, size_);
+   }
+ #endif
+ }
+diff --git a/src/heap/heap.cc b/src/heap/heap.cc
+index c88c264..035fb7c 100644
+--- a/src/heap/heap.cc
++++ b/src/heap/heap.cc
+@@ -3141,8 +3141,14 @@ void CreateFillerObjectAtImpl(Heap* heap, Address addr, int size,
+   DCHECK_IMPLIES(V8_COMPRESS_POINTERS_8GB_BOOL,
+                  IsAligned(size, kObjectAlignment8GbHeap));
+ 
++  // Rhénium : sans effacement, seul le début du filler (carte, taille) est
++  // écrit ; avec effacement, tout le bloc.
+   CodePageMemoryModificationScope memory_modification_scope(
+-      BasicMemoryChunk::FromAddress(addr));
++      BasicMemoryChunk::FromAddress(addr), addr,
++      clear_memory_mode == ClearFreedMemoryMode::kClearFreedMemory
++          ? static_cast<size_t>(size)
++          : std::min(static_cast<size_t>(size),
++                     static_cast<size_t>(4 * kTaggedSize)));
+ 
+   // TODO(v8:13070): Filler sizes are irrelevant for 8GB+ heaps. Adding them
+   // should be avoided in this mode.
+diff --git a/src/heap/heap.h b/src/heap/heap.h
+index ea71b9c..59f94ba 100644
+--- a/src/heap/heap.h
++++ b/src/heap/heap.h
+@@ -2555,6 +2555,11 @@ class V8_NODISCARD CodePageMemoryModificationScope {
+  public:
+   explicit inline CodePageMemoryModificationScope(BasicMemoryChunk* chunk);
+   explicit inline CodePageMemoryModificationScope(InstructionStream object);
++  // Rhénium : n'écrit que dans [start, start + size) ; sous Windows ARM32 seules
++  // les pages de 4 Ko de cette étendue passent en RW (voir RHENIUM_NARROW_
++  // CODE_WRITES). Ailleurs, comme la variante à chunk seul.
++  inline CodePageMemoryModificationScope(BasicMemoryChunk* chunk, Address start,
++                                         size_t size);
+   inline ~CodePageMemoryModificationScope();
+ 
+  private:
+@@ -2562,6 +2567,8 @@ class V8_NODISCARD CodePageMemoryModificationScope {
+   base::Optional<RwxMemoryWriteScope> rwx_write_scope_;
+ #else
+   BasicMemoryChunk* chunk_;
++  Address start_ = kNullAddress;  // Rhénium : size_ == 0 pour toute la page
++  size_t size_ = 0;
+   bool scope_active_;
+   base::Optional<base::MutexGuard> guard_;
+ #endif
+diff --git a/src/heap/memory-chunk.cc b/src/heap/memory-chunk.cc
+index 0fc34c1..84ad814 100644
+--- a/src/heap/memory-chunk.cc
++++ b/src/heap/memory-chunk.cc
+@@ -101,6 +101,62 @@ void MemoryChunk::SetDefaultCodePermissions() {
+   }
+ }
+ 
++#if RHENIUM_NARROW_CODE_WRITES
++namespace {
++
++// Pages de 4 Ko de la zone d'objets qui couvrent [start, start + size).
++bool CodeWriteRegion(const MemoryChunk* chunk, Address start, size_t size,
++                     Address* region_start, size_t* region_size) {
++  size_t page_size = MemoryAllocator::GetCommitPageSize();
++  Address area_start =
++      chunk->address() + MemoryChunkLayout::ObjectPageOffsetInCodePage();
++  Address area_end = area_start + RoundUp(chunk->area_size(), page_size);
++  Address begin = std::max(RoundDown(start, page_size), area_start);
++  Address end = std::min(RoundUp(start + size, page_size), area_end);
++  if (begin >= end) return false;
++  *region_start = begin;
++  *region_size = end - begin;
++  return true;
++}
++
++}  // namespace
++#endif  // RHENIUM_NARROW_CODE_WRITES
++
++base::MutexGuard MemoryChunk::SetCodeModificationPermissions(Address start,
++                                                             size_t size) {
++#if RHENIUM_NARROW_CODE_WRITES
++  Address region_start;
++  size_t region_size;
++  if (size != 0 &&
++      CodeWriteRegion(this, start, size, &region_start, &region_size)) {
++    DCHECK(IsFlagSet(MemoryChunk::IS_EXECUTABLE));
++    DCHECK(owner_identity() == CODE_SPACE || owner_identity() == CODE_LO_SPACE);
++    base::MutexGuard guard(page_protection_change_mutex_);
++    CHECK(reservation_.SetPermissions(
++        region_start, region_size, MemoryChunk::GetCodeModificationPermission()));
++    return guard;
++  }
++#endif
++  return SetCodeModificationPermissions();
++}
++
++void MemoryChunk::SetDefaultCodePermissions(Address start, size_t size) {
++#if RHENIUM_NARROW_CODE_WRITES
++  Address region_start;
++  size_t region_size;
++  if (size != 0 &&
++      CodeWriteRegion(this, start, size, &region_start, &region_size)) {
++    page_protection_change_mutex_->AssertHeld();
++    CHECK(reservation_.SetPermissions(
++        region_start, region_size,
++        v8_flags.jitless ? PageAllocator::kRead
++                         : PageAllocator::kReadExecute));
++    return;
++  }
++#endif
++  SetDefaultCodePermissions();
++}
++
+ MemoryChunk::MemoryChunk(Heap* heap, BaseSpace* space, size_t chunk_size,
+                          Address area_start, Address area_end,
+                          VirtualMemory reservation, Executability executable,
+diff --git a/src/heap/memory-chunk.h b/src/heap/memory-chunk.h
+index 453b540..c3b21d9 100644
+--- a/src/heap/memory-chunk.h
++++ b/src/heap/memory-chunk.h
+@@ -188,6 +188,15 @@ class MemoryChunk : public BasicMemoryChunk {
+   V8_EXPORT_PRIVATE base::MutexGuard SetCodeModificationPermissions();
+   V8_EXPORT_PRIVATE void SetDefaultCodePermissions();
+ 
++  // Rhénium : variantes limitées à [start, start + size) (arrondi aux pages
++  // de 4 Ko, borné à la zone d'objets). Le mutex de la page reste pris du début
++  // à la fin de la portée, comme pour la page entière : seul change le nombre de
++  // pages qui passent en RW. Avec size == 0, ou hors Windows ARM32, elles font
++  // la même chose que les variantes ci-dessus.
++  V8_EXPORT_PRIVATE base::MutexGuard SetCodeModificationPermissions(
++      Address start, size_t size);
++  V8_EXPORT_PRIVATE void SetDefaultCodePermissions(Address start, size_t size);
++
+   heap::ListNode<MemoryChunk>& list_node() { return list_node_; }
+   const heap::ListNode<MemoryChunk>& list_node() const { return list_node_; }
+ 
+diff --git a/src/libsampler/sampler.cc b/src/libsampler/sampler.cc
+index 83028c9..014b0a3 100644
+--- a/src/libsampler/sampler.cc
++++ b/src/libsampler/sampler.cc
+@@ -612,6 +612,12 @@ void Sampler::DoSample() {
+     state.pc = reinterpret_cast<void*>(context.Pc);
+     state.sp = reinterpret_cast<void*>(context.Sp);
+     state.fp = reinterpret_cast<void*>(context.Fp);
++#elif V8_HOST_ARCH_ARM
++    // Rhénium : Windows ARM32, R11 sert de pointeur de cadre.
++    state.pc = reinterpret_cast<void*>(context.Pc);
++    state.sp = reinterpret_cast<void*>(context.Sp);
++    state.fp = reinterpret_cast<void*>(context.R11);
++    state.lr = reinterpret_cast<void*>(context.Lr);
+ #else
+     state.pc = reinterpret_cast<void*>(context.Eip);
+     state.sp = reinterpret_cast<void*>(context.Esp);
+diff --git a/src/snapshot/embedded/platform-embedded-file-writer-win.cc b/src/snapshot/embedded/platform-embedded-file-writer-win.cc
+index 39a9935..70a735a 100644
+--- a/src/snapshot/embedded/platform-embedded-file-writer-win.cc
++++ b/src/snapshot/embedded/platform-embedded-file-writer-win.cc
+@@ -42,7 +42,9 @@ namespace internal {
+ 
+ // Name mangling.
+ // Symbols are prefixed with an underscore on 32-bit architectures.
+-#if !defined(V8_TARGET_ARCH_X64) && !defined(V8_TARGET_ARCH_ARM64)
++// Rhénium : seulement sur x86 ; Windows ARM32 ne décore pas les noms C.
++#if !defined(V8_TARGET_ARCH_X64) && !defined(V8_TARGET_ARCH_ARM64) && \
++    !defined(V8_TARGET_ARCH_ARM)
+ #define SYMBOL_PREFIX "_"
+ #else
+ #define SYMBOL_PREFIX ""
+diff --git a/src/utils/memcopy.cc b/src/utils/memcopy.cc
+index 591a6a5..dc508fd 100644
+--- a/src/utils/memcopy.cc
++++ b/src/utils/memcopy.cc
+@@ -25,7 +25,9 @@ V8_EXPORT_PRIVATE void MemMove(void* dest, const void* src, size_t size) {
+   // on all architectures we currently support.
+   (*memmove_function)(dest, src, size);
+ }
+-#elif(V8_OS_POSIX || V8_OS_STARBOARD) && V8_HOST_ARCH_ARM
++#elif(V8_OS_POSIX || V8_OS_STARBOARD || V8_OS_WIN) && V8_HOST_ARCH_ARM
++// Rhénium : V8_OS_WIN ajouté (Windows ARM32), memcopy.h déclare ce pointeur
++// pour tout hôte ARM.
+ V8_EXPORT_PRIVATE MemCopyUint8Function memcopy_uint8_function =
+     &MemCopyUint8Wrapper;
+ #elif V8_OS_POSIX && V8_HOST_ARCH_MIPS
+@@ -40,7 +42,8 @@ void init_memcopy_functions() {
+     memmove_function = reinterpret_cast<MemMoveFunction>(
+         d.InstructionStartOf(Builtin::kMemMove));
+   }
+-#elif(V8_OS_POSIX || V8_OS_STARBOARD) && V8_HOST_ARCH_ARM
++#elif(V8_OS_POSIX || V8_OS_STARBOARD || V8_OS_WIN) && V8_HOST_ARCH_ARM
++  // Rhénium : builtin A32 appelé par une adresse paire (BLX bascule en mode ARM).
+   if (Isolate::CurrentEmbeddedBlobIsBinaryEmbedded()) {
+     EmbeddedData d = EmbeddedData::FromBlob();
+     memcopy_uint8_function = reinterpret_cast<MemCopyUint8Function>(
+diff --git a/src/utils/utils.cc b/src/utils/utils.cc
+index e0b6270..d8da3dc 100644
+--- a/src/utils/utils.cc
++++ b/src/utils/utils.cc
+@@ -220,7 +220,7 @@ bool DoubleToBoolean(double d) {
+ }
+ 
+ uintptr_t GetCurrentStackPosition() {
+-#if V8_CC_MSVC
++#if V8_CC_MSVC && !V8_HOST_ARCH_ARM  // Rhénium : clang n'a pas cet intrinsèque sur ARM32
+   return reinterpret_cast<uintptr_t>(_AddressOfReturnAddress());
+ #else
+   return reinterpret_cast<uintptr_t>(__builtin_frame_address(0));

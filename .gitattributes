@@ -1,0 +1,6 @@
+* text=auto
+
+# Les correctifs s'appliquent octet pour octet : aucune conversion de fin de ligne.
+*.patch -text
+
+*.png binary

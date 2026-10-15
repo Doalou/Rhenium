@@ -1,0 +1,13 @@
+[package]
+name = "sonde_rust"
+version = "0.1.0"
+edition = "2021"
+
+# Bibliothèque statique liée dans la sonde C++, comme les composants Rust de Chromium.
+[lib]
+crate-type = ["staticlib"]
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1

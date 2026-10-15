@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Modèle : build.ps1 remplace @ARCH@ et @CAPABILITIES@. -->
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         IgnorableNamespaces="uap">
+  <Identity Name="Rhenium.Sonde" Publisher="CN=Rhenium Dev" Version="1.0.0.0" ProcessorArchitecture="@ARCH@" />
+  <Properties>
+    <DisplayName>Sonde Rhénium</DisplayName>
+    <PublisherDisplayName>Rhénium</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.15063.0" MaxVersionTested="10.0.15254.0" />
+  </Dependencies>
+  <Resources>
+    <Resource Language="fr-FR" />
+  </Resources>
+  <Applications>
+    <Application Id="App" Executable="RheniumSonde.exe" EntryPoint="RheniumSonde.App">
+      <uap:VisualElements DisplayName="Sonde Rhénium" Description="Mesure ce que Windows 10 Mobile accorde à Rhénium"
+                          BackgroundColor="#1E1E1E" Square150x150Logo="Assets\Square150x150Logo.png"
+                          Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:SplashScreen Image="Assets\SplashScreen.png" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+  <Capabilities>
+@CAPABILITIES@
+  </Capabilities>
+</Package>

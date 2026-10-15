@@ -1,0 +1,223 @@
+diff --git a/config/rust.gni b/config/rust.gni
+index f64b5b7..548529c 100644
+--- a/config/rust.gni
++++ b/config/rust.gni
+@@ -255,6 +255,9 @@ if (is_linux || is_chromeos) {
+     rust_abi_target = "x86_64-pc-windows-msvc"
+   } else if (current_cpu == "x86") {
+     rust_abi_target = "i686-pc-windows-msvc"
++  } else if (current_cpu == "arm") {
++    # Rhénium : Windows 10 Mobile (UWP ARM32), cible Rust de niveau 3 validée au jalon J0.
++    rust_abi_target = "thumbv7a-uwp-windows-msvc"
+   } else {
+     assert(false, "Architecture not supported")
+   }
+diff --git a/config/win/BUILD.gn b/config/win/BUILD.gn
+index 83be929..0550396 100644
+--- a/config/win/BUILD.gn
++++ b/config/win/BUILD.gn
+@@ -95,7 +95,8 @@ config("compiler") {
+     cflags += [ "/D__WRL_ENABLE_FUNCTION_STATICS__" ]
+ 
+     # Tell clang which version of MSVC to emulate.
+-    cflags += [ "-fmsc-version=1934" ]
++    # Rhénium : 1944 = MSVC 14.44, dont on utilise la STL (dernier toolset avec ARM32).
++    cflags += [ "-fmsc-version=1944" ]
+ 
+     if (is_component_build) {
+       cflags += [
+@@ -119,6 +120,9 @@ config("compiler") {
+       }
+     } else if (current_cpu == "arm64") {
+       cflags += [ "--target=arm64-windows" ]
++    } else if (current_cpu == "arm") {
++      # Rhénium : Windows 10 Mobile, ARMv7 Thumb-2 uniquement.
++      cflags += [ "--target=thumbv7-pc-windows-msvc" ]
+     } else {
+       assert(false, "unknown current_cpu " + current_cpu)
+     }
+@@ -128,6 +132,10 @@ config("compiler") {
+     # next step after SSE2 will be AVX.
+     if (current_cpu == "x86" || current_cpu == "x64") {
+       cflags += [ "-msse3" ]
++
++      # Rhénium : clang-cl récent (LLVM 23) lit l'asm GNU en syntaxe Intel par
++      # défaut sur x86 ; le code AT&T de V8 (push_registers_asm.cc) ne passe plus.
++      cflags += [ "/clang:-masm=att" ]
+     }
+ 
+     # Enable ANSI escape codes if something emulating them is around (cmd.exe
+@@ -289,8 +297,18 @@ config("runtime_library") {
+ # Windows is available at runtime. Targets using these libraries need to
+ # manually override this config for their compiles.
+ config("winver") {
++  # Rhénium : le SDK 10.0.19041 (dernier avec ARM32) ne connaît pas NTDDI_WIN10_NI ;
++  # sur ARM32 on vise l'API de Windows 10 Mobile 1703 (15063, RS2) pour que les
++  # fonctions absentes du téléphone soient refusées dès la compilation.
++  if (current_cpu == "arm") {
++    _ntddi = "NTDDI_WIN10_RS2"
++  } else if (windows_sdk_version == "10.0.19041.0") {
++    _ntddi = "NTDDI_WIN10_VB"
++  } else {
++    _ntddi = "NTDDI_WIN10_NI"
++  }
+   defines = [
+-    "NTDDI_VERSION=NTDDI_WIN10_NI",
++    "NTDDI_VERSION=$_ntddi",
+ 
+     # We can't say `=_WIN32_WINNT_WIN10` here because some files do
+     # `#if WINVER < 0x0600` without including windows.h before,
+@@ -597,7 +615,7 @@ if (current_cpu == "x64") {
+   # The number after the comma is the minimum required OS version.
+   # 5.02 = Windows Server 2003.
+   subsystem_version_suffix = ",5.02"
+-} else if (current_cpu == "arm64") {
++} else if (current_cpu == "arm64" || current_cpu == "arm") {
+   # Windows ARM64 requires Windows 10.
+   subsystem_version_suffix = ",10.0"
+ } else {
+diff --git a/config/win/visual_studio_version.gni b/config/win/visual_studio_version.gni
+index 1da479d..a910d20 100644
+--- a/config/win/visual_studio_version.gni
++++ b/config/win/visual_studio_version.gni
+@@ -40,5 +40,6 @@ if (visual_studio_path == "") {
+          "You must set the windows_sdk_version if you set the path")
+   assert(wdk_path != "",
+          "You must set the wdk_path if you set the visual studio path")
+-  visual_studio_runtime_dirs = []
++  # Rhénium : une chaîne non vide (et non une liste) : setup_toolchain.py attend un argument.
++  visual_studio_runtime_dirs = "none"
+ }
+diff --git a/toolchain/win/BUILD.gn b/toolchain/win/BUILD.gn
+index fe09790..70c5852 100644
+--- a/toolchain/win/BUILD.gn
++++ b/toolchain/win/BUILD.gn
+@@ -15,7 +15,8 @@ assert(is_win, "Should only be running on Windows")
+ 
+ # Copy the VS runtime DLL for the default toolchain to the root build directory
+ # so things will run.
+-if (current_toolchain == default_toolchain) {
++# Rhénium : rien à copier pour ARM32 (CRT statique, et aucun binaire ARM32 ne tourne sur le PC).
++if (current_toolchain == default_toolchain && target_cpu != "arm") {
+   if (is_debug) {
+     configuration_name = "Debug"
+   } else {
+@@ -48,6 +49,26 @@ if (target_cpu == "arm64") {
+   }
+ }
+ 
++# Rhénium : Windows ARM32 (Windows 10 Mobile). Toolchain cible « arm », toolchain hôte x64,
++# et toolchain x86 avec v8_current_cpu = "arm" pour mksnapshot (le snapshot doit être
++# produit par un binaire 32 bits, le simulateur ARM de V8 tournant sur le PC).
++if (target_cpu == "arm") {
++  win_toolchains("arm") {
++    toolchain_arch = "arm"
++  }
++  win_toolchains("x64") {
++    toolchain_arch = "x64"
++  }
++  win_toolchains("x86_v8_arm") {
++    toolchain_arch = "x86"
++    clang_toolchain_prefix = "clang_"
++    cl_toolchain_prefix = "msvc_"
++    toolchain_args = {
++      v8_current_cpu = "arm"
++    }
++  }
++}
++
+ # The nacl_win64 toolchain is nearly identical to the plain x64 toolchain.
+ # It's used solely for building nacl64.exe (//components/nacl/broker:nacl64).
+ # The only reason it's a separate toolchain is so that it can force
+diff --git a/toolchain/win/setup_toolchain.py b/toolchain/win/setup_toolchain.py
+index d2f5798..65233c1 100644
+--- a/toolchain/win/setup_toolchain.py
++++ b/toolchain/win/setup_toolchain.py
+@@ -101,6 +101,39 @@ def _LoadEnvFromBat(args):
+   return variables.decode(errors='ignore')
+ 
+ 
++def _RheniumToolchainEnv(cpu):
++  """Rhénium : environnement construit sans vcvarsall.bat.
++
++  Le vcvarsall de VS 2026 ne sait plus cibler ARM32, et le SDK 22621 attendu
++  plus haut n'a pas les bibliothèques ARM32. On pointe directement sur le
++  toolset MSVC 14.44 (RHENIUM_MSVC_DIR) et le Windows SDK 10.0.19041
++  (RHENIUM_WINSDK_DIR, RHENIUM_WINSDK_VERSION)."""
++  msvc = os.environ['RHENIUM_MSVC_DIR']
++  kits = os.environ.get('RHENIUM_WINSDK_DIR',
++                        r'C:\Program Files (x86)\Windows Kits\10')
++  ver = os.environ.get('RHENIUM_WINSDK_VERSION', '10.0.19041.0')
++  inc = os.path.join(kits, 'Include', ver)
++  lib = os.path.join(kits, 'Lib', ver)
++  cpu_dir = {'x86': 'x86', 'x64': 'x64', 'arm': 'arm', 'arm64': 'arm64'}[cpu]
++  env = {
++      'INCLUDE': ';'.join([os.path.join(msvc, 'include')] +
++                          [os.path.join(inc, d) for d in
++                           ('ucrt', 'um', 'shared', 'winrt', 'cppwinrt')]),
++      'LIB': ';'.join([os.path.join(msvc, 'lib', cpu_dir),
++                       os.path.join(lib, 'ucrt', cpu_dir),
++                       os.path.join(lib, 'um', cpu_dir)]),
++      'LIBPATH': os.path.join(msvc, 'lib', cpu_dir),
++      'PATH': os.pathsep.join([os.path.join(msvc, 'bin', 'Hostx64', cpu_dir),
++                               os.path.join(msvc, 'bin', 'Hostx64', 'x64'),
++                               os.path.join(kits, 'bin', ver, 'x64'),
++                               os.environ['PATH']]),
++  }
++  for name in ('SYSTEMROOT', 'TEMP', 'TMP', 'PATHEXT', 'USERPROFILE'):
++    if name in os.environ:
++      env[name] = os.environ[name]
++  return env
++
++
+ def _LoadToolchainEnv(cpu, toolchain_root, sdk_dir, target_store):
+   """Returns a dictionary with environment variables that must be set while
+   running binaries from the toolchain (e.g. INCLUDE and PATH for cl.exe)."""
+@@ -108,6 +141,8 @@ def _LoadToolchainEnv(cpu, toolchain_root, sdk_dir, target_store):
+   # the setup script from the SDK if so. |cpu| should be either
+   # 'x86' or 'x64' or 'arm' or 'arm64'.
+   assert cpu in ('x86', 'x64', 'arm', 'arm64')
++  if os.environ.get('RHENIUM_MSVC_DIR'):
++    return _RheniumToolchainEnv(cpu)
+   if bool(int(os.environ.get('DEPOT_TOOLS_WIN_TOOLCHAIN', 1))) and sdk_dir:
+     # Load environment from json file.
+     env = os.path.normpath(os.path.join(sdk_dir, 'bin/SetEnv.%s.json' % cpu))
+diff --git a/toolchain/win/toolchain.gni b/toolchain/win/toolchain.gni
+index a2a7108..1f3f08d 100644
+--- a/toolchain/win/toolchain.gni
++++ b/toolchain/win/toolchain.gni
+@@ -668,6 +668,9 @@ template("win_toolchains") {
+     win_toolchain_data = win_toolchain_data_x64
+   } else if (toolchain_arch == "arm64") {
+     win_toolchain_data = win_toolchain_data_arm64
++  } else if (toolchain_arch == "arm") {
++    # Rhénium : Windows ARM32.
++    win_toolchain_data = win_toolchain_data_arm
+   } else {
+     error("Unsupported toolchain_arch, add it to win_toolchain_data.gni")
+   }
+diff --git a/toolchain/win/win_toolchain_data.gni b/toolchain/win/win_toolchain_data.gni
+index a6e8328..4dbf74f 100644
+--- a/toolchain/win/win_toolchain_data.gni
++++ b/toolchain/win/win_toolchain_data.gni
+@@ -28,6 +28,20 @@ declare_args() {
+                     "environment.x64",
+                   ],
+                   "scope")
++  # Rhénium : Windows ARM32 (Windows 10 Mobile).
++  if (target_cpu == "arm") {
++    win_toolchain_data_arm =
++        exec_script("//build/toolchain/win/setup_toolchain.py",
++                    [
++                      visual_studio_path,
++                      windows_sdk_path,
++                      visual_studio_runtime_dirs,
++                      "win",
++                      "arm",
++                      "environment.arm",
++                    ],
++                    "scope")
++  }
+   if (target_cpu == "arm64" || host_cpu == "arm64") {
+     win_toolchain_data_arm64 =
+         exec_script("//build/toolchain/win/setup_toolchain.py",
