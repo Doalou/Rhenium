@@ -1,0 +1,9 @@
+# Racine GN minimale de Rhénium, copiée en ..\chromium\src\.gn par build-base.ps1.
+
+import("//build/dotfile_settings.gni")
+
+buildconfig = "//build/config/BUILDCONFIG.gn"
+script_executable = "python3"
+
+exec_script_whitelist =
+    build_dotfile_settings.exec_script_whitelist + [ "//build_overrides/build.gni" ]

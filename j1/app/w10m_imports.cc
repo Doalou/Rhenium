@@ -1,5 +1,5 @@
 // Windows 10 Mobile n'a pas kernel32legacy.dll, vers laquelle le schéma des api sets envoie
-// trois fonctions qu'utilise V8 (kernel32-legacy, synch-ansi, mm-time) : l'app ne
+// des fonctions qu'utilisent V8 et //base (kernel32-legacy, synch-ansi, mm-time) : l'app ne
 // démarrerait pas. On définit ici leurs pointeurs d'import (__imp_*), que l'éditeur de
 // liens prend à la place des imports, avec des équivalents disponibles pour les apps.
 
@@ -37,6 +37,16 @@ DWORD WINAPI RheniumTimeGetTime() {
   return static_cast<DWORD>(now.QuadPart / frequency * 1000 + now.QuadPart % frequency * 1000 / frequency);
 }
 
+// //base (time_win.cc) règle la résolution du minuteur système : sans objet pour une app,
+// le minuteur de W10M n'est pas réglable. MMRESULT est un UINT, absent des en-têtes « app ».
+UINT WINAPI RheniumTimeBeginPeriod(UINT) {
+  return 0;  // TIMERR_NOERROR
+}
+
+UINT WINAPI RheniumTimeEndPeriod(UINT) {
+  return 0;  // TIMERR_NOERROR
+}
+
 }  // namespace
 
 extern "C" {
@@ -56,4 +66,6 @@ decltype(&RheniumOutputDebugStringA) __imp_OutputDebugStringA = &RheniumOutputDe
 decltype(&RheniumVerifyVersionInfoW) __imp_VerifyVersionInfoW = &RheniumVerifyVersionInfoW;
 decltype(&RheniumCreateSemaphoreA) __imp_CreateSemaphoreA = &RheniumCreateSemaphoreA;
 decltype(&RheniumTimeGetTime) __imp_timeGetTime = &RheniumTimeGetTime;
+decltype(&RheniumTimeBeginPeriod) __imp_timeBeginPeriod = &RheniumTimeBeginPeriod;
+decltype(&RheniumTimeEndPeriod) __imp_timeEndPeriod = &RheniumTimeEndPeriod;
 }

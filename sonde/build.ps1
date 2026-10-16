@@ -10,6 +10,9 @@
   ./build.ps1 -WithA32            # ajoute le test du mode A32 de V8 (..\j1\app\a32_probe.h), ARM32 seulement
   ./build.ps1 -WithV8             # lie V8 (..\v8\out\arm.release\obj\v8_monolith.lib) et exécute du JavaScript ;
                                   # implique -Compiler clang, ARM32 seulement
+  ./build.ps1 -WithBase           # lie Chromium //base (..\chromium\src\out\uwp-arm\obj\rhenium_base.lib, voir
+                                  # ..\j1-base\build-base.ps1) et exécute son test de fumée ; clang, ARM32 seulement
+  ./build.ps1 -ImportCheck out\RheniumSonde_arm-clang-base.exe  # vérifie sur le téléphone les imports d'un autre exe
 #>
 param(
   [ValidateSet('arm', 'arm64', 'x64')] [string] $Arch = 'arm',
@@ -19,6 +22,7 @@ param(
   [switch] $WithA32,
   [switch] $WithV8,
   [int] $V8First = 0,  # avec -WithV8 : configuration V8 (base 0) du premier lancement après installation
+  [switch] $WithBase,
   [string] $ImportCheck,  # exe dont la sonde vérifiera chaque import sur le téléphone (DLL hôte + export)
   [string] $ClangDir  # dossier contenant clang-cl.exe et lld-link.exe, sinon recherche automatique
 )
@@ -29,6 +33,11 @@ $kits = "${env:ProgramFiles(x86)}\Windows Kits\10"
 if ($WithV8) {
   if ($Arch -ne 'arm') { throw '-WithV8 ne concerne que -Arch arm.' }
   $Compiler = 'clang'  # la cale V8 est compilée par clang-cl, comme V8
+}
+if ($WithBase) {
+  if ($Arch -ne 'arm') { throw '-WithBase ne concerne que -Arch arm.' }
+  if ($WithV8) { throw '-WithBase et -WithV8 ne se combinent pas encore (deux copies de //base).' }
+  $Compiler = 'clang'
 }
 
 function Invoke-Tool {
@@ -130,24 +139,29 @@ $codegen = if ($NoCodeGeneration) { 0 } else { 1 }
 $clangDefine = "/DSONDE_CLANG=$([int]($Compiler -eq 'clang'))"
 if ($WithA32 -and $Arch -ne 'arm') { throw '-WithA32 ne concerne que -Arch arm.' }
 $a32Flags = @(if ($WithA32) { '/DSONDE_A32=1', "/I$root\..\j1\app" } else { '/DSONDE_A32=0' })
-$a32Flags += "/DSONDE_V8=$([int][bool]$WithV8)", "/DSONDE_V8_FIRST=$V8First"
+$a32Flags += "/DSONDE_V8=$([int][bool]$WithV8)", "/DSONDE_V8_FIRST=$V8First", "/DSONDE_BASE=$([int][bool]$WithBase)"
 
-# Liste des imports (hors chargement différé) d'un autre exe, vérifiés un par un par la sonde :
-# une DLL ou un export absent du téléphone empêche cet exe de démarrer, sans aucun message.
+# Liste des imports d'un autre exe, vérifiés un par un par la sonde : une DLL ou un export
+# absent du téléphone empêche cet exe de démarrer, sans aucun message. Les imports en
+# chargement différé ne bloquent pas le démarrage, seulement l'appel : ils sont signalés à part.
 if ($ImportCheck) {
   $dumpbin = "$msvc\bin\Hostx64\x64\dumpbin.exe"
-  $cur = ''; $delay = $false
+  $cur = ''; $delay = 'false'
   $pairs = foreach ($l in (& $dumpbin /nologo /imports (Resolve-Path $ImportCheck))) {
-    if ($l -match 'delay load imports') { $delay = $true }
-    if ($delay) { continue }
-    if ($l -match '^\s{4}(\S+\.dll)\s*$') { $cur = $Matches[1] }
-    elseif ($cur -and $l -match '^\s+[0-9A-F]+\s+(\S+)$') { "    {`"$cur`", `"$($Matches[1])`"}," }
+    if ($l -match 'delay load imports') { $delay = 'true'; $cur = '' }
+    if ($l -match '^\s+Summary\s*$') { break }
+    if ($l -match '^\s{4}(\S+\.dll)\s*$') { $cur = $Matches[1]; continue }
+    if (-not $cur) { continue }
+    # « indice nom » (imports) ou « adresse indice nom » (différés) ; « Ordinal n » : import par numéro
+    $name = if ($l -match 'Ordinal\s+(\d+)\s*$') { "#$($Matches[1])" }
+            elseif ($l -match '^\s+(?:[0-9A-F]+\s+)?[0-9A-F]+\s+([A-Za-z_?@][\w@?$]*)\s*$' -and $Matches[1] -ne 'Characteristics') { $Matches[1] }
+    if ($name) { "    {`"$cur`", `"$name`", $delay}," }
   }
   New-Item -ItemType Directory -Force "$out\gen" | Out-Null
   @"
 // Généré par build.ps1 -ImportCheck $(Split-Path $ImportCheck -Leaf) : $($pairs.Count) imports.
 #pragma once
-struct ImportToCheck { char const* dll; char const* function; };
+struct ImportToCheck { char const* dll; char const* function; bool delayed; };
 inline constexpr ImportToCheck kImportsToCheck[] = {
 $($pairs -join "`n")
 };
@@ -188,13 +202,6 @@ if ($WithV8) {
     "/I$inc\ucrt", "/I$inc\um", "/I$inc\shared", "/I$msvc\include",
     "/Fo$obj\v8_shim.obj", "$root\..\j1\app\v8_shim.cc"))
   $objs += "$obj\v8_shim.obj"
-  # Remplace les trois fonctions que le schéma des api sets envoie vers kernel32legacy.dll,
-  # absente de Windows 10 Mobile (sinon l'app ne démarre pas).
-  Invoke-Tool $clang @("--target=$target", '/vctoolsdir', $msvc, '/winsdkdir', $kits, '/winsdkversion', $sdkVer,
-    '/nologo', '/c', '/O2', '/MT', '/W3', '/DWINAPI_FAMILY=WINAPI_FAMILY_APP', '-Wno-unused-command-line-argument',
-    "/I$inc\ucrt", "/I$inc\um", "/I$inc\shared", "/I$msvc\include",
-    "/Fo$obj\w10m_imports.obj", "$root\..\j1\app\w10m_imports.cc")
-  $objs += "$obj\w10m_imports.obj"
   # dbghelp (traces de pile de V8) en chargement différé : rien ne garantit sa présence
   # sur le téléphone, et V8 ne s'en sert qu'en cas de plantage.
   $v8Libs = @($v8Lib, 'dbghelp.lib', 'delayimp.lib', '/DELAYLOAD:dbghelp.dll', "/LIBPATH:$msvc\lib\$Arch", '/ERRORLIMIT:0',
@@ -202,12 +209,37 @@ if ($WithV8) {
   Write-Host "V8 : $([math]::Round((Get-Item $v8Lib).Length / 1MB)) Mo · $($v8Defines.Count) macros" -ForegroundColor Cyan
 }
 
+# --- Chromium //base : bibliothèque complète (//base, dépendances, test de fumée) produite par
+# ..\j1-base\build-base.ps1. Les DLL de bureau sont en chargement différé : leur absence sur le
+# téléphone ne bloque que l'appel, pas le démarrage (la vérification des imports les liste à part).
+$baseLibs = @()
+if ($WithBase) {
+  $baseLib = (Resolve-Path "$root\..").Path + '\chromium\src\out\uwp-arm\obj\rhenium_base.lib'
+  if (-not (Test-Path $baseLib)) { throw "//base n'est pas compilé : lancer ..\j1-base\build-base.ps1 ($baseLib absent)." }
+  $desktopDlls = 'user32', 'gdi32', 'shell32', 'shlwapi', 'setupapi', 'dbghelp', 'oleaut32', 'ole32', 'advapi32',
+    'powrprof', 'cfgmgr32', 'winmm', 'version', 'userenv', 'propsys', 'wbemuuid', 'ntdll'
+  $baseLibs = @($baseLib) + @($desktopDlls | ForEach-Object { "$_.lib" }) +
+    @($desktopDlls | Where-Object { $_ -notin 'ntdll', 'wbemuuid' } | ForEach-Object { "/DELAYLOAD:$_.dll" }) +
+    @('delayimp.lib', "/LIBPATH:$msvc\lib\$Arch", '/ERRORLIMIT:0', "/MAP:$out\RheniumSonde.map")
+  Write-Host "//base : $([math]::Round((Get-Item $baseLib).Length / 1MB)) Mo" -ForegroundColor Cyan
+}
+
+# Remplace les fonctions que le schéma des api sets envoie vers kernel32legacy.dll, absente de
+# Windows 10 Mobile (sinon l'app ne démarre pas).
+if ($WithV8 -or $WithBase) {
+  Invoke-Tool $clang @("--target=$target", '/vctoolsdir', $msvc, '/winsdkdir', $kits, '/winsdkversion', $sdkVer,
+    '/nologo', '/c', '/O2', '/MT', '/W3', '/DWINAPI_FAMILY=WINAPI_FAMILY_APP', '-Wno-unused-command-line-argument',
+    "/I$inc\ucrt", "/I$inc\um", "/I$inc\shared", "/I$msvc\include",
+    "/Fo$obj\w10m_imports.obj", "$root\..\j1\app\w10m_imports.cc")
+  $objs += "$obj\w10m_imports.obj"
+}
+
 # --- Édition de liens : CRT statique (vcruntime, STL) + UCRT système, sans dépendance à VCLibs
 $exe = "$pkg\RheniumSonde.exe"
 $ldflags = @('/nologo', '/APPCONTAINER', '/SUBSYSTEM:WINDOWS', "/MACHINE:$machine", '/MANIFEST:NO',
   '/DYNAMICBASE', '/NXCOMPAT', "/OUT:$exe") + $objs + @(
   "/LIBPATH:$msvc\lib\onecore\$Arch", "/LIBPATH:$kits\Lib\$sdkVer\um\$Arch", "/LIBPATH:$kits\Lib\$sdkVer\ucrt\$Arch",
-  'WindowsApp.lib', 'd3d11.lib', 'dxgi.lib', 'ucrt.lib', '/NODEFAULTLIB:libucrt.lib', '/NODEFAULTLIB:kernel32.lib') + $rustLibs + $v8Libs
+  'WindowsApp.lib', 'd3d11.lib', 'dxgi.lib', 'ucrt.lib', '/NODEFAULTLIB:libucrt.lib', '/NODEFAULTLIB:kernel32.lib') + $rustLibs + $v8Libs + $baseLibs
 Invoke-Tool $ld $ldflags
 
 # --- Paquet
@@ -220,10 +252,12 @@ Invoke-Tool "$sdkBin\makepri.exe" @('createconfig', '/cf', "$out\priconfig.xml",
 Invoke-Tool "$sdkBin\makepri.exe" @('new', '/pr', $pkg, '/cf', "$out\priconfig.xml", '/mn', "$pkg\AppxManifest.xml",
   '/of', "$pkg\resources.pri", '/o')
 
-$suffix = $(if ($WithRust) { '-rust' } else { '' }) + $(if ($WithA32) { '-a32' } else { '' }) + $(if ($WithV8) { '-v8' } else { '' }) +
+$suffix = $(if ($WithRust) { '-rust' } else { '' }) + $(if ($WithA32) { '-a32' } else { '' }) + $(if ($WithV8) { '-v8' } else { '' }) + $(if ($WithBase) { '-base' } else { '' }) +
+  $(if ($ImportCheck) { '-imports' } else { '' }) +
   $(if ($NoCodeGeneration) { '_sans-codegen' } else { '' })
 $appx = "$root\out\RheniumSonde_$Arch-$Compiler$suffix.appx"
 Invoke-Tool "$sdkBin\makeappx.exe" @('pack', '/d', $pkg, '/p', $appx, '/o')
+Copy-Item $exe ($appx -replace '\.appx$', '.exe') -Force  # pour -ImportCheck : out\<arch>-<compilateur> est vidé à chaque build
 
 # --- Signature avec un certificat de développement local (créé au premier build, hors magasin Windows)
 $pfx = "$root\certs\RheniumDev.pfx"

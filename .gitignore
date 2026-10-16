@@ -1,5 +1,6 @@
-# Sources de V8 (dépôts git à part, récupérés par j1\fetch.ps1) et jonction vers LLVM
+# Sources de V8 et de Chromium (récupérées par j1\fetch.ps1 et j1-base\fetch.ps1) et jonction vers LLVM
 /v8/
+/chromium/
 /toolchains/
 
 # Sorties de build

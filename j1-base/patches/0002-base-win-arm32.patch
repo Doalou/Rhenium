@@ -1,0 +1,1380 @@
+diff --git a/base/BUILD.gn b/base/BUILD.gn
+index 304223b5..851284e0 100644
+--- a/base/BUILD.gn
++++ b/base/BUILD.gn
+@@ -2016,6 +2016,31 @@ component("base") {
+       # in generated build files.
+       "//tools/win/DebugVisualizers/chrome.natvis",
+     ]
++
++    # Rhénium : pas de création de processus sous UWP (mono-processus).
++    # Rhénium : pas de fenêtres HWND sous Windows 10 Mobile, la pompe UI passe
++    # par le CoreDispatcher.
++    if (current_os == "winuwp") {
++      sources -= [
++        "process/launch_win.cc",
++        "win/message_window.cc",
++        "win/message_window.h",
++      ]
++      sources += [
++        "message_loop/message_pump_uwp.cc",
++        "message_loop/message_pump_uwp.h",
++        "process/launch_uwp.cc",
++      ]
++    }
++
++    # Rhénium : pas d'ATL pour ARM32, seuls des tests incluent win/atl.h.
++    if (current_cpu == "arm") {
++      sources -= [
++        "win/atl.h",
++        "win/atl_throw.cc",
++        "win/atl_throw.h",
++      ]
++    }
+   }
+ 
+   if (!is_win) {
+diff --git a/base/allocator/partition_allocator/partition_alloc_base/immediate_crash.h b/base/allocator/partition_allocator/partition_alloc_base/immediate_crash.h
+index 58f8cb60..e63d3c37 100644
+--- a/base/allocator/partition_allocator/partition_alloc_base/immediate_crash.h
++++ b/base/allocator/partition_allocator/partition_alloc_base/immediate_crash.h
+@@ -101,6 +101,12 @@
+ // https://crbug.com/958373
+ #define PA_TRAP_SEQUENCE2_() __asm volatile("")
+ 
++#elif defined(ARCH_CPU_ARMEL)
++
++// Rhénium : Windows ARM32 (Thumb-2).
++#define PA_TRAP_SEQUENCE1_() __debugbreak()
++#define PA_TRAP_SEQUENCE2_() asm volatile("udf #0")
++
+ #else
+ 
+ #define PA_TRAP_SEQUENCE1_() asm volatile("int3")
+diff --git a/base/allocator/partition_allocator/partition_alloc_base/time/time_win.cc b/base/allocator/partition_allocator/partition_alloc_base/time/time_win.cc
+index 43fa17d6..efb62b8b 100644
+--- a/base/allocator/partition_allocator/partition_alloc_base/time/time_win.cc
++++ b/base/allocator/partition_allocator/partition_alloc_base/time/time_win.cc
+@@ -575,7 +575,8 @@ ThreadTicks ThreadTicks::GetForThread(
+     const PlatformThreadHandle& thread_handle) {
+   PA_DCHECK(IsSupported());
+ 
+-#if defined(ARCH_CPU_ARM64)
++// Rhénium : ARM_FAMILY au lieu d'ARM64, pas de TSC sur ARM32 non plus.
++#if defined(ARCH_CPU_ARM_FAMILY)
+   // QueryThreadCycleTime versus TSCTicksPerSecond doesn't have much relation to
+   // actual elapsed time on Windows on Arm, because QueryThreadCycleTime is
+   // backed by the actual number of CPU cycles executed, rather than a
+@@ -608,7 +609,7 @@ ThreadTicks ThreadTicks::GetForThread(
+ 
+ // static
+ bool ThreadTicks::IsSupportedWin() {
+-#if defined(ARCH_CPU_ARM64)
++#if defined(ARCH_CPU_ARM_FAMILY)
+   // The Arm implementation does not use QueryThreadCycleTime and therefore does
+   // not care about the time stamp counter.
+   return true;
+@@ -619,7 +620,7 @@ bool ThreadTicks::IsSupportedWin() {
+ 
+ // static
+ void ThreadTicks::WaitUntilInitializedWin() {
+-#if !defined(ARCH_CPU_ARM64)
++#if !defined(ARCH_CPU_ARM_FAMILY)
+   while (time_internal::TSCTicksPerSecond() == 0)
+     ::Sleep(10);
+ #endif
+@@ -654,7 +655,7 @@ ABI::Windows::Foundation::DateTime TimeDelta::ToWinrtDateTime() const {
+   return date_time;
+ }
+ 
+-#if !defined(ARCH_CPU_ARM64)
++#if !defined(ARCH_CPU_ARM_FAMILY)
+ namespace time_internal {
+ 
+ bool HasConstantRateTSC() {
+@@ -721,6 +722,6 @@ double TSCTicksPerSecond() {
+ }
+ 
+ }  // namespace time_internal
+-#endif  // defined(ARCH_CPU_ARM64)
++#endif  // defined(ARCH_CPU_ARM_FAMILY)
+ 
+ }  // namespace partition_alloc::internal::base
+diff --git a/base/allocator/partition_allocator/partition_tls_win.cc b/base/allocator/partition_allocator/partition_tls_win.cc
+index 5f1b161a..7f46ea24 100644
+--- a/base/allocator/partition_allocator/partition_tls_win.cc
++++ b/base/allocator/partition_allocator/partition_tls_win.cc
+@@ -68,7 +68,8 @@ void PartitionTlsSetOnDllProcessDetach(void (*callback)()) {
+ // it's not already there.  (e.g. if __declspec(thread) is not used).  Force a
+ // reference to partition_tls_thread_exit_callback to prevent whole program
+ // optimization from discarding the variable.
+-#ifdef _WIN64
++// Rhénium : pas de souligné initial sur ARM32 non plus, seul x86 décore.
++#if defined(_WIN64) || defined(_M_ARM)
+ 
+ #pragma comment(linker, "/INCLUDE:_tls_used")
+ #pragma comment(linker, "/INCLUDE:partition_tls_thread_exit_callback")
+diff --git a/base/base_paths_win.cc b/base/base_paths_win.cc
+index 3ac45e74..5da42fcd 100644
+--- a/base/base_paths_win.cc
++++ b/base/base_paths_win.cc
+@@ -17,10 +17,92 @@
+ #include "base/win/scoped_co_mem.h"
+ #include "base/win/windows_version.h"
+ 
++#if defined(WINUWP)
++#include <windows.storage.h>
++#include <wrl/client.h>
++
++#include "base/win/core_winrt_util.h"
++#include "base/win/scoped_hstring.h"
++#endif
++
+ using base::FilePath;
+ 
+ namespace base {
+ 
++#if defined(WINUWP)
++namespace {
++
++// Rhénium : dossiers de l'app UWP, lus dans Windows.Storage.ApplicationData.
++bool GetAppDataFolder(bool roaming, FilePath* result) {
++  using ABI::Windows::Storage::IApplicationData;
++  using ABI::Windows::Storage::IApplicationDataStatics;
++  using ABI::Windows::Storage::IStorageFolder;
++  using ABI::Windows::Storage::IStorageItem;
++  using Microsoft::WRL::ComPtr;
++
++  ComPtr<IApplicationDataStatics> statics;
++  HRESULT hr = win::GetActivationFactory<
++      IApplicationDataStatics, RuntimeClass_Windows_Storage_ApplicationData>(
++      &statics);
++  ComPtr<IApplicationData> data;
++  if (SUCCEEDED(hr))
++    hr = statics->get_Current(&data);
++  ComPtr<IStorageFolder> folder;
++  if (SUCCEEDED(hr)) {
++    hr = roaming ? data->get_RoamingFolder(&folder)
++                 : data->get_LocalFolder(&folder);
++  }
++  ComPtr<IStorageItem> item;
++  if (SUCCEEDED(hr))
++    hr = folder.As(&item);
++  HSTRING path = nullptr;
++  if (SUCCEEDED(hr))
++    hr = item->get_Path(&path);
++  if (FAILED(hr))
++    return false;
++  win::ScopedHString scoped_path(path);
++  *result = FilePath(scoped_path.Get());
++  return true;
++}
++
++}  // namespace
++
++// Rhénium : une app UWP n'a accès ni aux dossiers du shell ni à ceux des
++// autres utilisateurs ; seuls l'exécutable, le système et ses propres
++// dossiers de données ont un sens.
++bool PathProviderWin(int key, FilePath* result) {
++  wchar_t system_buffer[MAX_PATH];
++  system_buffer[0] = 0;
++
++  switch (key) {
++    case base::FILE_EXE:
++      if (GetModuleFileName(NULL, system_buffer, MAX_PATH) == 0)
++        return false;
++      break;
++    case base::FILE_MODULE:
++      if (GetModuleFileName(CURRENT_MODULE(), system_buffer, MAX_PATH) == 0)
++        return false;
++      break;
++    case base::DIR_WINDOWS:
++      GetWindowsDirectory(system_buffer, MAX_PATH);
++      break;
++    case base::DIR_SYSTEM:
++      GetSystemDirectory(system_buffer, MAX_PATH);
++      break;
++    case base::DIR_LOCAL_APP_DATA:
++    case base::DIR_COMMON_APP_DATA:
++      return GetAppDataFolder(false, result);
++    case base::DIR_ROAMING_APP_DATA:
++      return GetAppDataFolder(true, result);
++    default:
++      return false;
++  }
++
++  *result = FilePath(system_buffer);
++  return true;
++}
++
++#else
+ bool PathProviderWin(int key, FilePath* result) {
+   // We need to go compute the value. It would be nice to support paths with
+   // names longer than MAX_PATH, but the system functions don't seem to be
+@@ -208,5 +290,6 @@ bool PathProviderWin(int key, FilePath* result) {
+   *result = cur;
+   return true;
+ }
++#endif  // defined(WINUWP)
+ 
+ }  // namespace base
+diff --git a/base/debug/invalid_access_win.cc b/base/debug/invalid_access_win.cc
+index dc0d54bb..448016d2 100644
+--- a/base/debug/invalid_access_win.cc
++++ b/base/debug/invalid_access_win.cc
+@@ -23,15 +23,24 @@ static constexpr int kNopInstructionSize = 1;
+ #elif defined(ARCH_CPU_ARM64)
+ // On Arm systems, all instructions are 4 bytes, fixed size.
+ static constexpr int kNopInstructionSize = 4;
++#elif defined(ARCH_CPU_ARMEL)
++// Rhénium : Windows ARM32 est en Thumb-2, où nop fait 2 octets.
++static constexpr int kNopInstructionSize = 2;
+ #else
+ #error "Unsupported architecture"
+ #endif
+ 
+ // Function that can be jumped midway into safely.
+ __attribute__((naked)) int nop_sled() {
++#if defined(ARCH_CPU_ARMEL)
++  asm("nop\n"
++      "nop\n"
++      "bx lr\n");
++#else
+   asm("nop\n"
+       "nop\n"
+       "ret\n");
++#endif
+ }
+ 
+ using FuncType = decltype(&nop_sled);
+diff --git a/base/debug/stack_trace_win.cc b/base/debug/stack_trace_win.cc
+index e7328d69..bced019f 100644
+--- a/base/debug/stack_trace_win.cc
++++ b/base/debug/stack_trace_win.cc
+@@ -366,6 +366,12 @@ void StackTrace::InitTrace(const CONTEXT* context_record) {
+   stack_frame.AddrPC.Offset = context_record->Eip;
+   stack_frame.AddrFrame.Offset = context_record->Ebp;
+   stack_frame.AddrStack.Offset = context_record->Esp;
++#elif defined(ARCH_CPU_ARMEL)
++  // Rhénium : Windows ARM32 (Thumb-2), R11 sert de pointeur de cadre.
++  DWORD machine_type = IMAGE_FILE_MACHINE_ARMNT;
++  stack_frame.AddrPC.Offset = context_record->Pc;
++  stack_frame.AddrFrame.Offset = context_record->R11;
++  stack_frame.AddrStack.Offset = context_record->Sp;
+ #else
+ #error Unsupported Windows Arch
+ #endif
+diff --git a/base/files/file_util_win.cc b/base/files/file_util_win.cc
+index d7b5fb20..60f0083f 100644
+--- a/base/files/file_util_win.cc
++++ b/base/files/file_util_win.cc
+@@ -34,6 +34,7 @@
+ #include "base/location.h"
+ #include "base/logging.h"
+ #include "base/numerics/safe_conversions.h"
++#include "base/base_paths.h"
+ #include "base/path_service.h"
+ #include "base/process/process_handle.h"
+ #include "base/rand_util.h"
+@@ -66,6 +67,15 @@ const DWORD kFileShareAll =
+     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+ const wchar_t kDefaultTempDirPrefix[] = L"ChromiumTemp";
+ 
++// Rhénium : une app UWP ne tourne jamais en administrateur.
++bool IsUserAnAdmin() {
++#if defined(WINUWP)
++  return false;
++#else
++  return ::IsUserAnAdmin();
++#endif
++}
++
+ // Returns the Win32 last error code or ERROR_SUCCESS if the last error code is
+ // ERROR_FILE_NOT_FOUND or ERROR_PATH_NOT_FOUND. This is useful in cases where
+ // the absence of a file or path is a success condition (e.g., when attempting
+@@ -406,7 +416,7 @@ bool IsPathSafeToSetAclOn(const FilePath& path) {
+   // Admin users create temporary files in `GetSecureSystemTemp`, see
+   // `CreateNewTempDirectory` below.
+   FilePath secure_system_temp;
+-  if (::IsUserAnAdmin() && GetSecureSystemTemp(&secure_system_temp)) {
++  if (IsUserAnAdmin() && GetSecureSystemTemp(&secure_system_temp)) {
+     valid_paths.push_back(secure_system_temp);
+   }
+ 
+@@ -578,12 +588,19 @@ bool GetTempDir(FilePath* path) {
+ }
+ 
+ FilePath GetHomeDir() {
++#if defined(WINUWP)
++  // Rhénium : sous UWP, le dossier local de l'app tient lieu de profil.
++  FilePath local_app_data;
++  if (PathService::Get(DIR_LOCAL_APP_DATA, &local_app_data))
++    return local_app_data;
++#else
+   wchar_t result[MAX_PATH];
+   if (SUCCEEDED(SHGetFolderPath(NULL, CSIDL_PROFILE, NULL, SHGFP_TYPE_CURRENT,
+                                 result)) &&
+       result[0]) {
+     return FilePath(result);
+   }
++#endif
+ 
+   // Fall back to the temporary directory on failure.
+   FilePath temp;
+@@ -727,7 +744,7 @@ bool CreateNewTempDirectory(const FilePath::StringType& prefix,
+   DCHECK(new_temp_path);
+ 
+   FilePath parent_dir;
+-  if (::IsUserAnAdmin() && GetSecureSystemTemp(&parent_dir) &&
++  if (IsUserAnAdmin() && GetSecureSystemTemp(&parent_dir) &&
+       CreateTemporaryDirInDir(parent_dir,
+                               prefix.empty() ? kDefaultTempDirPrefix : prefix,
+                               new_temp_path)) {
+diff --git a/base/functional/bind_internal.h b/base/functional/bind_internal.h
+index 3b3c5918..dfef5823 100644
+--- a/base/functional/bind_internal.h
++++ b/base/functional/bind_internal.h
+@@ -637,7 +637,9 @@ struct FunctorTraits<R (*)(Args...)> {
+   }
+ };
+ 
+-#if BUILDFLAG(IS_WIN) && !defined(ARCH_CPU_64_BITS)
++// Rhénium : x86 seulement ; sur ARM32, __stdcall et __fastcall sont ignorés et ces
++// spécialisations doubleraient les génériques.
++#if BUILDFLAG(IS_WIN) && defined(ARCH_CPU_X86)
+ 
+ // For functions.
+ template <typename R, typename... Args>
+@@ -764,7 +766,7 @@ struct FunctorTraits<R (Receiver::*)(Args...) const> {
+   }
+ };
+ 
+-#if BUILDFLAG(IS_WIN) && !defined(ARCH_CPU_64_BITS)
++#if BUILDFLAG(IS_WIN) && defined(ARCH_CPU_X86)  // Rhénium : voir plus haut
+ 
+ // For __stdcall methods.
+ template <typename R, typename Receiver, typename... Args>
+diff --git a/base/immediate_crash.h b/base/immediate_crash.h
+index 049c9eef..18d1b79b 100644
+--- a/base/immediate_crash.h
++++ b/base/immediate_crash.h
+@@ -109,6 +109,12 @@
+ // https://crbug.com/958373
+ #define TRAP_SEQUENCE2_() __asm volatile("")
+ 
++#elif defined(ARCH_CPU_ARMEL)
++
++// Rhénium : Windows ARM32 (Thumb-2).
++#define TRAP_SEQUENCE1_() __debugbreak()
++#define TRAP_SEQUENCE2_() asm volatile("udf #0")
++
+ #else
+ 
+ #define TRAP_SEQUENCE1_() asm volatile("int3")
+diff --git a/base/message_loop/message_pump_uwp.cc b/base/message_loop/message_pump_uwp.cc
+new file mode 100644
+index 00000000..85b7cfc0
+--- /dev/null
++++ b/base/message_loop/message_pump_uwp.cc
+@@ -0,0 +1,271 @@
++// Copyright 2026 The Rhénium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "base/message_loop/message_pump_uwp.h"
++
++#include <windows.system.threading.h>
++#include <windows.ui.core.h>
++#include <wrl/client.h>
++#include <wrl/event.h>
++#include <wrl/ftm.h>
++#include <wrl/implements.h>
++
++#include <algorithm>
++#include <atomic>
++
++#include "base/check.h"
++#include "base/logging.h"
++#include "base/memory/ref_counted.h"
++#include "base/run_loop.h"
++#include "base/win/core_winrt_util.h"
++
++namespace base {
++
++namespace {
++
++using ABI::Windows::Foundation::IAsyncAction;
++using ABI::Windows::System::Threading::IThreadPoolTimer;
++using ABI::Windows::System::Threading::IThreadPoolTimerStatics;
++using ABI::Windows::System::Threading::ITimerElapsedHandler;
++using ABI::Windows::UI::Core::ICoreDispatcher;
++using ABI::Windows::UI::Core::ICoreWindow;
++using ABI::Windows::UI::Core::ICoreWindowStatic;
++using ABI::Windows::UI::Core::IDispatchedHandler;
++using Microsoft::WRL::Callback;
++using Microsoft::WRL::ClassicCom;
++using Microsoft::WRL::ComPtr;
++using Microsoft::WRL::FtmBase;
++using Microsoft::WRL::Implements;
++using Microsoft::WRL::RuntimeClassFlags;
++
++// Les rappels sont agiles : appelés depuis le pool de threads ou le
++// CoreDispatcher, quel que soit le thread qui les a créés.
++template <typename Interface>
++using AgileCallback =
++    Implements<RuntimeClassFlags<ClassicCom>, Interface, FtmBase>;
++
++constexpr int kWork = -1;
++
++}  // namespace
++
++// Partagé entre la pompe et ses rappels en attente, qui peuvent survivre à la
++// pompe : pump est remis à nul à sa destruction (sur le thread UI, comme les
++// rappels du CoreDispatcher).
++class MessagePumpForUI::Core : public RefCountedThreadSafe<Core> {
++ public:
++  Core(ComPtr<ICoreDispatcher> dispatcher,
++       ComPtr<IThreadPoolTimerStatics> timer_statics,
++       MessagePumpForUI* pump)
++      : dispatcher(std::move(dispatcher)),
++        timer_statics(std::move(timer_statics)),
++        pump(pump) {}
++
++  // N'importe quel thread : demande HandleWork (kWork) ou HandleTimer(n) sur le
++  // thread UI.
++  HRESULT RunOnUiThread(int what) {
++    scoped_refptr<Core> self(this);
++    auto handler =
++        Callback<AgileCallback<IDispatchedHandler>>([self, what]() -> HRESULT {
++          self->Dispatch(what);
++          return S_OK;
++        });
++    if (!handler)
++      return E_OUTOFMEMORY;
++    ComPtr<IAsyncAction> action;
++    return dispatcher->RunAsync(
++        ABI::Windows::UI::Core::CoreDispatcherPriority_Normal, handler.Get(),
++        &action);
++  }
++
++  void Dispatch(int what) {
++    if (!pump)
++      return;
++    if (what == kWork) {
++      work_scheduled.store(false);
++      pump->HandleWork();
++    } else {
++      pump->HandleTimer(what);
++    }
++  }
++
++  const ComPtr<ICoreDispatcher> dispatcher;
++  const ComPtr<IThreadPoolTimerStatics> timer_statics;
++  std::atomic<bool> work_scheduled{false};
++
++  // Thread UI seulement.
++  raw_ptr<MessagePumpForUI> pump;
++  ComPtr<IThreadPoolTimer> timer;
++
++ private:
++  friend class RefCountedThreadSafe<Core>;
++  ~Core() = default;
++};
++
++MessagePumpForUI::MessagePumpForUI() {
++  ComPtr<ICoreWindowStatic> window_statics;
++  HRESULT hr = win::GetActivationFactory<
++      ICoreWindowStatic, RuntimeClass_Windows_UI_Core_CoreWindow>(
++      &window_statics);
++  ComPtr<ICoreWindow> window;
++  if (SUCCEEDED(hr))
++    hr = window_statics->GetForCurrentThread(&window);
++  CHECK(SUCCEEDED(hr) && window)
++      << "MessagePumpForUI doit être créée sur un thread avec une CoreWindow";
++  ComPtr<ICoreDispatcher> dispatcher;
++  hr = window->get_Dispatcher(&dispatcher);
++  CHECK(SUCCEEDED(hr) && dispatcher);
++  ComPtr<IThreadPoolTimerStatics> timer_statics;
++  hr = win::GetActivationFactory<
++      IThreadPoolTimerStatics,
++      RuntimeClass_Windows_System_Threading_ThreadPoolTimer>(&timer_statics);
++  CHECK(SUCCEEDED(hr) && timer_statics);
++  core_ = MakeRefCounted<Core>(std::move(dispatcher), std::move(timer_statics),
++                               this);
++}
++
++MessagePumpForUI::~MessagePumpForUI() {
++  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
++  CancelTimer();
++  core_->pump = nullptr;
++}
++
++void MessagePumpForUI::Run(Delegate* delegate) {
++  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
++  RunState state;
++  run_states_.push_back(&state);
++  Delegate* const previous_delegate = delegate_;
++  delegate_ = delegate;
++
++  ScheduleWork();
++  while (!state.should_quit) {
++    last_process_events_result_ = core_->dispatcher->ProcessEvents(
++        ABI::Windows::UI::Core::CoreProcessEventsOption_ProcessOneAndAllPending);
++    if (FAILED(last_process_events_result_)) {
++      LOG(ERROR) << "CoreDispatcher::ProcessEvents : " << std::hex
++                 << last_process_events_result_;
++      break;
++    }
++  }
++
++  run_states_.pop_back();
++  delegate_ = previous_delegate;
++  // La boucle extérieure (Attach ou Run) reprend son travail.
++  if (delegate_)
++    ScheduleWork();
++}
++
++void MessagePumpForUI::Quit() {
++  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
++  if (!run_states_.empty()) {
++    run_states_.back()->should_quit = true;
++    ScheduleWork();  // réveille ProcessEvents
++    return;
++  }
++  if (attached_run_loop_ && !attached_quit_) {
++    attached_quit_ = true;
++    CancelTimer();
++    attached_run_loop_->AfterRun();
++    attached_run_loop_.reset();
++  }
++}
++
++void MessagePumpForUI::Attach(Delegate* delegate) {
++  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
++  DCHECK(!attached_run_loop_);
++  delegate_ = delegate;
++  attached_quit_ = false;
++  attached_run_loop_ = std::make_unique<RunLoop>();
++  CHECK(attached_run_loop_->BeforeRun());
++  ScheduleWork();
++}
++
++void MessagePumpForUI::ScheduleWork() {
++  if (core_->work_scheduled.exchange(true))
++    return;
++  if (FAILED(core_->RunOnUiThread(kWork)))
++    core_->work_scheduled.store(false);
++}
++
++void MessagePumpForUI::ScheduleDelayedWork(
++    const Delegate::NextWorkInfo& next_work_info) {
++  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
++  const TimeTicks run_time = next_work_info.delayed_run_time;
++  if (run_time.is_max()) {
++    CancelTimer();
++    return;
++  }
++  if (core_->timer && run_time == timer_run_time_)
++    return;
++  CancelTimer();
++
++  const TimeDelta delay = run_time - TimeTicks::Now();
++  if (delay <= TimeDelta()) {
++    ScheduleWork();
++    return;
++  }
++  timer_run_time_ = run_time;
++  const int generation = ++timer_generation_;
++  scoped_refptr<Core> core = core_;
++  auto handler = Callback<AgileCallback<ITimerElapsedHandler>>(
++      [core, generation](IThreadPoolTimer*) -> HRESULT {
++        core->RunOnUiThread(generation);
++        return S_OK;
++      });
++  // Arrondi à la milliseconde supérieure : un réveil en avance ne ferait que
++  // reprogrammer le minuteur.
++  ABI::Windows::Foundation::TimeSpan span;
++  span.Duration = delay.InMillisecondsRoundedUp() * 10000;
++  HRESULT hr = handler ? core_->timer_statics->CreateTimer(handler.Get(), span,
++                                                           &core_->timer)
++                       : E_OUTOFMEMORY;
++  if (FAILED(hr)) {
++    LOG(ERROR) << "ThreadPoolTimer::CreateTimer : " << std::hex << hr;
++    timer_run_time_ = TimeTicks();
++    ScheduleWork();
++  }
++}
++
++void MessagePumpForUI::HandleWork() {
++  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
++  if (!delegate_)
++    return;
++  if (run_states_.empty() ? !attached_run_loop_
++                          : run_states_.back()->should_quit) {
++    return;
++  }
++
++  // Une passe de travail, puis la main revient au CoreDispatcher pour que les
++  // entrées et le rendu XAML s'intercalent.
++  Delegate::NextWorkInfo next_work_info = delegate_->DoWork();
++  if (next_work_info.is_immediate()) {
++    ScheduleWork();
++    return;
++  }
++  if (delegate_->DoIdleWork()) {
++    ScheduleWork();
++    return;
++  }
++  delegate_->BeforeWait();
++  ScheduleDelayedWork(next_work_info);
++}
++
++void MessagePumpForUI::HandleTimer(int timer_generation) {
++  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
++  if (timer_generation != timer_generation_)
++    return;  // minuteur annulé ou remplacé entre-temps
++  core_->timer.Reset();
++  timer_run_time_ = TimeTicks();
++  HandleWork();
++}
++
++void MessagePumpForUI::CancelTimer() {
++  if (core_->timer) {
++    core_->timer->Cancel();
++    core_->timer.Reset();
++  }
++  timer_run_time_ = TimeTicks();
++  ++timer_generation_;
++}
++
++}  // namespace base
+diff --git a/base/message_loop/message_pump_uwp.h b/base/message_loop/message_pump_uwp.h
+new file mode 100644
+index 00000000..8a8f2d63
+--- /dev/null
++++ b/base/message_loop/message_pump_uwp.h
+@@ -0,0 +1,95 @@
++// Copyright 2026 The Rhénium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef BASE_MESSAGE_LOOP_MESSAGE_PUMP_UWP_H_
++#define BASE_MESSAGE_LOOP_MESSAGE_PUMP_UWP_H_
++
++#include <windows.h>
++
++#include <memory>
++#include <vector>
++
++#include "base/base_export.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/scoped_refptr.h"
++#include "base/message_loop/message_pump.h"
++#include "base/threading/thread_checker.h"
++#include "base/time/time.h"
++
++namespace base {
++
++class RunLoop;
++
++// Rhénium : pompe du thread UI d'une app UWP, sans fenêtre HWND (Windows 10
++// Mobile n'a pas les fonctions de fenêtres de user32). Le travail est posté
++// sur le CoreDispatcher du thread (RunAsync), le travail différé passe par un
++// ThreadPoolTimer qui repasse par le CoreDispatcher.
++//
++// Comme sur Android, la boucle du thread appartient au système (XAML ou
++// CoreApplication) : à la liaison d'un SingleThreadTaskExecutor de type UI, la
++// pompe s'attache (Attach) au lieu d'être lancée par Run(). Run() reste
++// possible pour un RunLoop imbriqué : il appelle CoreDispatcher::ProcessEvents
++// jusqu'à Quit().
++//
++// À créer sur un thread qui a une CoreWindow.
++class BASE_EXPORT MessagePumpForUI : public MessagePump {
++ public:
++  // Inutilisé sous UWP (pas de MSG), gardé pour CurrentUIThread.
++  class BASE_EXPORT Observer {
++   public:
++    virtual void WillDispatchMSG(const MSG& msg) = 0;
++    virtual void DidDispatchMSG(const MSG& msg) = 0;
++  };
++
++  MessagePumpForUI();
++  MessagePumpForUI(const MessagePumpForUI&) = delete;
++  MessagePumpForUI& operator=(const MessagePumpForUI&) = delete;
++  ~MessagePumpForUI() override;
++
++  // MessagePump :
++  void Run(Delegate* delegate) override;
++  void Quit() override;
++  void ScheduleWork() override;
++  void ScheduleDelayedWork(
++      const Delegate::NextWorkInfo& next_work_info) override;
++
++  // Branche la pompe sur la boucle du système sans la lancer.
++  void Attach(Delegate* delegate);
++
++  void AddObserver(Observer* observer) {}
++  void RemoveObserver(Observer* observer) {}
++
++  // Résultat du dernier CoreDispatcher::ProcessEvents (S_OK s'il n'y en a pas
++  // eu), pour le diagnostic.
++  HRESULT last_process_events_result() const {
++    return last_process_events_result_;
++  }
++
++ private:
++  class Core;
++
++  struct RunState {
++    bool should_quit = false;
++  };
++
++  // Appelés sur le thread UI, depuis le CoreDispatcher.
++  void HandleWork();
++  void HandleTimer(int timer_generation);
++
++  void CancelTimer();
++
++  THREAD_CHECKER(thread_checker_);
++  scoped_refptr<Core> core_;
++  raw_ptr<Delegate> delegate_ = nullptr;
++  std::vector<RunState*> run_states_;
++  std::unique_ptr<RunLoop> attached_run_loop_;
++  bool attached_quit_ = false;
++  TimeTicks timer_run_time_;
++  int timer_generation_ = 0;
++  HRESULT last_process_events_result_ = S_OK;
++};
++
++}  // namespace base
++
++#endif  // BASE_MESSAGE_LOOP_MESSAGE_PUMP_UWP_H_
+diff --git a/base/message_loop/message_pump_win.cc b/base/message_loop/message_pump_win.cc
+index e6d84c4b..103e276b 100644
+--- a/base/message_loop/message_pump_win.cc
++++ b/base/message_loop/message_pump_win.cc
+@@ -84,6 +84,7 @@ void MessagePumpWin::Quit() {
+   run_state_->should_quit = true;
+ }
+ 
++#if !defined(WINUWP)
+ //-----------------------------------------------------------------------------
+ // MessagePumpForUI public:
+ 
+@@ -620,6 +621,7 @@ bool MessagePumpForUI::ProcessPumpReplacementMessage() {
+   ScheduleWork();
+   return ProcessMessageHelper(msg);
+ }
++#endif  // !defined(WINUWP)
+ 
+ //-----------------------------------------------------------------------------
+ // MessagePumpForIO public:
+diff --git a/base/message_loop/message_pump_win.h b/base/message_loop/message_pump_win.h
+index 68afdb23..6c719628 100644
+--- a/base/message_loop/message_pump_win.h
++++ b/base/message_loop/message_pump_win.h
+@@ -19,7 +19,9 @@
+ #include "base/observer_list.h"
+ #include "base/threading/thread_checker.h"
+ #include "base/time/time.h"
++#if !defined(WINUWP)
+ #include "base/win/message_window.h"
++#endif
+ #include "base/win/scoped_handle.h"
+ #include "third_party/abseil-cpp/absl/types/optional.h"
+ 
+@@ -130,6 +132,9 @@ class BASE_EXPORT MessagePumpWin : public MessagePump {
+ // an excellent choice.  It is also helpful that the starter messages that are
+ // placed in the queue when new task arrive also awakens DoRunLoop.
+ //
++// Rhénium : sous UWP, pas de fenêtre HWND ; MessagePumpForUI est définie dans
++// message_pump_uwp.h, sur le CoreDispatcher.
++#if !defined(WINUWP)
+ class BASE_EXPORT MessagePumpForUI : public MessagePumpWin {
+  public:
+   MessagePumpForUI();
+@@ -181,6 +186,7 @@ class BASE_EXPORT MessagePumpForUI : public MessagePumpWin {
+ 
+   ObserverList<Observer>::Unchecked observers_;
+ };
++#endif  // !defined(WINUWP)
+ 
+ //-----------------------------------------------------------------------------
+ // MessagePumpForIO extends MessagePumpWin with methods that are particular to a
+@@ -297,4 +303,8 @@ class BASE_EXPORT MessagePumpForIO : public MessagePumpWin {
+ 
+ }  // namespace base
+ 
++#if defined(WINUWP)
++#include "base/message_loop/message_pump_uwp.h"
++#endif
++
+ #endif  // BASE_MESSAGE_LOOP_MESSAGE_PUMP_WIN_H_
+diff --git a/base/power_monitor/power_monitor_device_source_win.cc b/base/power_monitor/power_monitor_device_source_win.cc
+index 4e7b6563..c102bc94 100644
+--- a/base/power_monitor/power_monitor_device_source_win.cc
++++ b/base/power_monitor/power_monitor_device_source_win.cc
+@@ -100,6 +100,10 @@ PowerMonitorDeviceSource::PowerMessageWindow::PowerMessageWindow() {
+         << "Cannot create windows on non-UI thread, power monitor disabled!";
+     return;
+   }
++#if defined(WINUWP)
++  // Rhénium : pas de fenêtre ni de WM_POWERBROADCAST sous Windows 10 Mobile.
++  // TODO(Rhénium) : événements d'énergie via Windows.System.Power.
++#else
+   WNDCLASSEX window_class;
+   base::win::InitializeWindowClass(
+       kWindowClassName,
+@@ -119,9 +123,11 @@ PowerMonitorDeviceSource::PowerMessageWindow::PowerMessageWindow() {
+     power_notify_handle_ = ::RegisterSuspendResumeNotification(
+         message_hwnd_, DEVICE_NOTIFY_WINDOW_HANDLE);
+   }
++#endif
+ }
+ 
+ PowerMonitorDeviceSource::PowerMessageWindow::~PowerMessageWindow() {
++#if !defined(WINUWP)
+   if (message_hwnd_) {
+     if (power_notify_handle_)
+       ::UnregisterSuspendResumeNotification(power_notify_handle_);
+@@ -129,6 +135,7 @@ PowerMonitorDeviceSource::PowerMessageWindow::~PowerMessageWindow() {
+     ::DestroyWindow(message_hwnd_);
+     ::UnregisterClass(kWindowClassName, instance_);
+   }
++#endif
+ }
+ 
+ // static
+@@ -137,6 +144,9 @@ LRESULT CALLBACK PowerMonitorDeviceSource::PowerMessageWindow::WndProcThunk(
+     UINT message,
+     WPARAM wparam,
+     LPARAM lparam) {
++#if defined(WINUWP)
++  return 0;
++#else
+   switch (message) {
+     case WM_POWERBROADCAST:
+       ProcessWmPowerBroadcastMessage(wparam);
+@@ -144,6 +154,7 @@ LRESULT CALLBACK PowerMonitorDeviceSource::PowerMessageWindow::WndProcThunk(
+     default:
+       return ::DefWindowProc(hwnd, message, wparam, lparam);
+   }
++#endif
+ }
+ 
+ }  // namespace base
+diff --git a/base/process/launch_uwp.cc b/base/process/launch_uwp.cc
+new file mode 100644
+index 00000000..658ec292
+--- /dev/null
++++ b/base/process/launch_uwp.cc
+@@ -0,0 +1,53 @@
++// Copyright 2026 The Rhénium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Rhénium : une app UWP de Windows 10 Mobile ne peut pas créer de processus.
++// Chromium y tourne en mono-processus ; ces fonctions échouent proprement.
++
++#include "base/process/launch.h"
++
++#include <windows.h>
++
++#include "base/logging.h"
++
++namespace base {
++
++void RouteStdioToConsole(bool create_console_if_not_found) {}
++
++Process LaunchProcess(const CommandLine& cmdline,
++                      const LaunchOptions& options) {
++  return LaunchProcess(cmdline.GetCommandLineString(), options);
++}
++
++Process LaunchProcess(const CommandLine::StringType& cmdline,
++                      const LaunchOptions& options) {
++  LOG(ERROR) << "LaunchProcess indisponible sous UWP : " << cmdline;
++  return Process();
++}
++
++bool SetJobObjectLimitFlags(HANDLE job_object, DWORD limit_flags) {
++  return false;
++}
++
++bool GetAppOutput(const CommandLine& cl, std::string* output) {
++  return false;
++}
++
++bool GetAppOutputAndError(const CommandLine& cl, std::string* output) {
++  return false;
++}
++
++bool GetAppOutputWithExitCode(const CommandLine& cl,
++                              std::string* output,
++                              int* exit_code) {
++  return false;
++}
++
++bool GetAppOutput(CommandLine::StringPieceType cl, std::string* output) {
++  return false;
++}
++
++void RaiseProcessToHighPriority() {}
++
++}  // namespace base
+diff --git a/base/process/process_metrics_win.cc b/base/process/process_metrics_win.cc
+index 35fe6f67..429fb8a5 100644
+--- a/base/process/process_metrics_win.cc
++++ b/base/process/process_metrics_win.cc
+@@ -161,11 +161,12 @@ TimeDelta ProcessMetrics::GetCumulativeCPUUsage() {
+ }
+ 
+ TimeDelta ProcessMetrics::GetPreciseCumulativeCPUUsage() {
+-#if defined(ARCH_CPU_ARM64)
++// Rhénium : ARM32 non plus n'a pas de TSC.
++#if defined(ARCH_CPU_ARM_FAMILY)
+   // Precise CPU usage is not available on Arm CPUs because they don't support
+   // constant rate TSC.
+   return GetCumulativeCPUUsage();
+-#else   // !defined(ARCH_CPU_ARM64)
++#else   // !defined(ARCH_CPU_ARM_FAMILY)
+   if (!time_internal::HasConstantRateTSC())
+     return GetCumulativeCPUUsage();
+ 
+@@ -186,7 +187,7 @@ TimeDelta ProcessMetrics::GetPreciseCumulativeCPUUsage() {
+ 
+   const double process_time_seconds = process_cycle_time / tsc_ticks_per_second;
+   return Seconds(process_time_seconds);
+-#endif  // !defined(ARCH_CPU_ARM64)
++#endif  // !defined(ARCH_CPU_ARM_FAMILY)
+ }
+ 
+ bool ProcessMetrics::GetIOCounters(IoCounters* io_counters) const {
+diff --git a/base/profiler/register_context.h b/base/profiler/register_context.h
+index 34a2ed48..632b7415 100644
+--- a/base/profiler/register_context.h
++++ b/base/profiler/register_context.h
+@@ -44,6 +44,8 @@ inline uintptr_t& RegisterContextStackPointer(::CONTEXT* context) {
+   return context->Rsp;
+ #elif defined(ARCH_CPU_ARM64)
+   return context->Sp;
++#elif defined(ARCH_CPU_ARMEL)  // Rhénium : Windows ARM32, R11 pointeur de cadre
++  return AsUintPtr(&context->Sp);
+ #else
+   return AsUintPtr(&context->Esp);
+ #endif
+@@ -54,6 +56,8 @@ inline uintptr_t& RegisterContextFramePointer(::CONTEXT* context) {
+   return context->Rbp;
+ #elif defined(ARCH_CPU_ARM64)
+   return context->Fp;
++#elif defined(ARCH_CPU_ARMEL)
++  return AsUintPtr(&context->R11);
+ #else
+   return AsUintPtr(&context->Ebp);
+ #endif
+@@ -64,6 +68,8 @@ inline uintptr_t& RegisterContextInstructionPointer(::CONTEXT* context) {
+   return context->Rip;
+ #elif defined(ARCH_CPU_ARM64)
+   return context->Pc;
++#elif defined(ARCH_CPU_ARMEL)
++  return AsUintPtr(&context->Pc);
+ #else
+   return AsUintPtr(&context->Eip);
+ #endif
+diff --git a/base/profiler/win32_stack_frame_unwinder.h b/base/profiler/win32_stack_frame_unwinder.h
+index 75e09f1e..b98a3f7d 100644
+--- a/base/profiler/win32_stack_frame_unwinder.h
++++ b/base/profiler/win32_stack_frame_unwinder.h
+@@ -30,7 +30,7 @@ inline ULONG64 ContextPC(CONTEXT* context) {
+   return context->Rip;
+ #elif defined(ARCH_CPU_X86)
+   return context->Eip;
+-#elif defined(ARCH_CPU_ARM64)
++#elif defined(ARCH_CPU_ARM64) || defined(ARCH_CPU_ARMEL)
+   return context->Pc;
+ #else
+ #error Unsupported Windows Arch
+diff --git a/base/run_loop.h b/base/run_loop.h
+index 3da3cc78..f9a40596 100644
+--- a/base/run_loop.h
++++ b/base/run_loop.h
+@@ -274,9 +274,9 @@ class BASE_EXPORT RunLoop {
+   FRIEND_TEST_ALL_PREFIXES(SingleThreadTaskExecutorTypedTest,
+                            RunLoopQuitOrderAfter);
+ 
+-#if BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(IS_ANDROID) || defined(WINUWP)
+   // Android doesn't support the blocking RunLoop::Run, so it calls
+-  // BeforeRun and AfterRun directly.
++  // BeforeRun and AfterRun directly. Rhénium : UWP non plus (Attach).
+   friend class MessagePumpForUI;
+ #endif
+ 
+diff --git a/base/task/sequence_manager/sequence_manager_impl.cc b/base/task/sequence_manager/sequence_manager_impl.cc
+index 1306b204..8422532d 100644
+--- a/base/task/sequence_manager/sequence_manager_impl.cc
++++ b/base/task/sequence_manager/sequence_manager_impl.cc
+@@ -345,7 +345,8 @@ void SequenceManagerImpl::BindToMessagePump(std::unique_ptr<MessagePump> pump) {
+ #endif
+ 
+   // On iOS attach to the native loop when there is one.
+-#if BUILDFLAG(IS_IOS)
++  // Rhénium : sous UWP aussi, la boucle du thread UI est celle du système.
++#if BUILDFLAG(IS_IOS) || defined(WINUWP)
+   if (settings_.message_loop_type == MessagePumpType::UI) {
+     controller_->AttachToMessagePump();
+   }
+diff --git a/base/task/sequence_manager/thread_controller.h b/base/task/sequence_manager/thread_controller.h
+index d7cb0654..81dce44f 100644
+--- a/base/task/sequence_manager/thread_controller.h
++++ b/base/task/sequence_manager/thread_controller.h
+@@ -132,7 +132,7 @@ class BASE_EXPORT ThreadController {
+   // Returns true if the current run loop should quit when idle.
+   virtual bool ShouldQuitRunLoopWhenIdle() = 0;
+ 
+-#if BUILDFLAG(IS_IOS) || BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(IS_IOS) || BUILDFLAG(IS_ANDROID) || defined(WINUWP)
+   // On iOS, the main message loop cannot be Run().  Instead call
+   // AttachToMessagePump(), which connects this ThreadController to the
+   // UI thread's CFRunLoop and allows PostTask() to work.
+diff --git a/base/task/sequence_manager/thread_controller_impl.cc b/base/task/sequence_manager/thread_controller_impl.cc
+index 424a7af5..0f4d2b0b 100644
+--- a/base/task/sequence_manager/thread_controller_impl.cc
++++ b/base/task/sequence_manager/thread_controller_impl.cc
+@@ -363,7 +363,7 @@ MessagePump* ThreadControllerImpl::GetBoundMessagePump() const {
+   return nullptr;
+ }
+ 
+-#if BUILDFLAG(IS_IOS) || BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(IS_IOS) || BUILDFLAG(IS_ANDROID) || defined(WINUWP)
+ void ThreadControllerImpl::AttachToMessagePump() {
+   NOTREACHED();
+ }
+diff --git a/base/task/sequence_manager/thread_controller_impl.h b/base/task/sequence_manager/thread_controller_impl.h
+index f49f71b1..9a0212bd 100644
+--- a/base/task/sequence_manager/thread_controller_impl.h
++++ b/base/task/sequence_manager/thread_controller_impl.h
+@@ -61,7 +61,7 @@ class BASE_EXPORT ThreadControllerImpl : public ThreadController,
+   void SetTaskExecutionAllowed(bool allowed) override;
+   bool IsTaskExecutionAllowed() const override;
+   MessagePump* GetBoundMessagePump() const override;
+-#if BUILDFLAG(IS_IOS) || BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(IS_IOS) || BUILDFLAG(IS_ANDROID) || defined(WINUWP)
+   void AttachToMessagePump() override;
+ #endif
+ #if BUILDFLAG(IS_IOS)
+diff --git a/base/task/sequence_manager/thread_controller_with_message_pump_impl.cc b/base/task/sequence_manager/thread_controller_with_message_pump_impl.cc
+index 7e027675..442cb99a 100644
+--- a/base/task/sequence_manager/thread_controller_with_message_pump_impl.cc
++++ b/base/task/sequence_manager/thread_controller_with_message_pump_impl.cc
+@@ -29,6 +29,8 @@
+ #include "base/message_loop/message_pump_mac.h"
+ #elif BUILDFLAG(IS_ANDROID)
+ #include "base/message_loop/message_pump_android.h"
++#elif defined(WINUWP)
++#include "base/message_loop/message_pump_uwp.h"
+ #endif
+ 
+ namespace base {
+@@ -738,6 +740,11 @@ void ThreadControllerWithMessagePumpImpl::AttachToMessagePump() {
+   main_thread_only().can_change_batch_size = false;
+   static_cast<MessagePumpForUI*>(pump_.get())->Attach(this);
+ }
++#elif defined(WINUWP)
++// Rhénium : le thread UI d'une app UWP tourne dans la boucle du CoreDispatcher.
++void ThreadControllerWithMessagePumpImpl::AttachToMessagePump() {
++  static_cast<MessagePumpForUI*>(pump_.get())->Attach(this);
++}
+ #endif
+ 
+ bool ThreadControllerWithMessagePumpImpl::ShouldQuitRunLoopWhenIdle() {
+diff --git a/base/task/sequence_manager/thread_controller_with_message_pump_impl.h b/base/task/sequence_manager/thread_controller_with_message_pump_impl.h
+index 5f5b42fb..212223ed 100644
+--- a/base/task/sequence_manager/thread_controller_with_message_pump_impl.h
++++ b/base/task/sequence_manager/thread_controller_with_message_pump_impl.h
+@@ -74,7 +74,7 @@ class BASE_EXPORT ThreadControllerWithMessagePumpImpl
+   bool IsTaskExecutionAllowed() const override;
+   MessagePump* GetBoundMessagePump() const override;
+   void PrioritizeYieldingToNative(base::TimeTicks prioritize_until) override;
+-#if BUILDFLAG(IS_IOS) || BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(IS_IOS) || BUILDFLAG(IS_ANDROID) || defined(WINUWP)
+   void AttachToMessagePump() override;
+ #endif
+ #if BUILDFLAG(IS_IOS)
+diff --git a/base/task/thread_pool/pooled_single_thread_task_runner_manager.cc b/base/task/thread_pool/pooled_single_thread_task_runner_manager.cc
+index a43703f1..892ea48d 100644
+--- a/base/task/thread_pool/pooled_single_thread_task_runner_manager.cc
++++ b/base/task/thread_pool/pooled_single_thread_task_runner_manager.cc
+@@ -355,12 +355,20 @@ class WorkerThreadCOMDelegate : public WorkerThreadDelegate {
+     const DWORD milliseconds_wait = checked_cast<DWORD>(
+         sleep_time.is_max() ? INFINITE : sleep_time.InMilliseconds());
+     const HANDLE wake_up_event_handle = wake_up_event->handle();
++#if defined(WINUWP)
++    ::WaitForSingleObject(wake_up_event_handle, milliseconds_wait);
++#else
+     MsgWaitForMultipleObjectsEx(1, &wake_up_event_handle, milliseconds_wait,
+                                 QS_ALLINPUT, 0);
++#endif
+   }
+ 
+  private:
+   RegisteredTaskSource GetWorkFromWindowsMessageQueue() {
++#if defined(WINUWP)
++    // Rhénium : pas de file de messages de fenêtres sous Windows 10 Mobile.
++    return nullptr;
++#else
+     MSG msg;
+     if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE) != FALSE) {
+       Task pump_message_task(FROM_HERE,
+@@ -394,6 +402,7 @@ class WorkerThreadCOMDelegate : public WorkerThreadDelegate {
+       }
+     }
+     return nullptr;
++#endif
+   }
+ 
+   bool get_work_first_ = true;
+diff --git a/base/threading/thread_local_storage_win.cc b/base/threading/thread_local_storage_win.cc
+index f88f27f9..e7e78489 100644
+--- a/base/threading/thread_local_storage_win.cc
++++ b/base/threading/thread_local_storage_win.cc
+@@ -46,7 +46,8 @@ void PlatformThreadLocalStorage::SetTLSValue(TLSKey key, void* value) {
+ // if it's not already there.  (e.g. if __declspec(thread) is not used).
+ // Force a reference to p_thread_callback_base to prevent whole program
+ // optimization from discarding the variable.
+-#ifdef _WIN64
++// Rhénium : pas de souligné initial sur ARM32 non plus, seul x86 décore.
++#if defined(_WIN64) || defined(_M_ARM)
+ 
+ #pragma comment(linker, "/INCLUDE:_tls_used")
+ #pragma comment(linker, "/INCLUDE:p_thread_callback_base")
+diff --git a/base/time/time_win.cc b/base/time/time_win.cc
+index c6540592..3c500ff8 100644
+--- a/base/time/time_win.cc
++++ b/base/time/time_win.cc
+@@ -667,7 +667,8 @@ ThreadTicks ThreadTicks::GetForThread(
+     const PlatformThreadHandle& thread_handle) {
+   DCHECK(IsSupported());
+ 
+-#if defined(ARCH_CPU_ARM64)
++// Rhénium : ARM_FAMILY au lieu d'ARM64, pas de TSC sur ARM32 non plus.
++#if defined(ARCH_CPU_ARM_FAMILY)
+   // QueryThreadCycleTime versus TSCTicksPerSecond doesn't have much relation to
+   // actual elapsed time on Windows on Arm, because QueryThreadCycleTime is
+   // backed by the actual number of CPU cycles executed, rather than a
+@@ -700,7 +701,7 @@ ThreadTicks ThreadTicks::GetForThread(
+ 
+ // static
+ bool ThreadTicks::IsSupportedWin() {
+-#if defined(ARCH_CPU_ARM64)
++#if defined(ARCH_CPU_ARM_FAMILY)
+   // The Arm implementation does not use QueryThreadCycleTime and therefore does
+   // not care about the time stamp counter.
+   return true;
+@@ -711,7 +712,7 @@ bool ThreadTicks::IsSupportedWin() {
+ 
+ // static
+ void ThreadTicks::WaitUntilInitializedWin() {
+-#if !defined(ARCH_CPU_ARM64)
++#if !defined(ARCH_CPU_ARM_FAMILY)
+   while (time_internal::TSCTicksPerSecond() == 0)
+     ::Sleep(10);
+ #endif
+@@ -758,7 +759,7 @@ ABI::Windows::Foundation::TimeSpan TimeDelta::ToWinrtTimeSpan() const {
+   return time_span;
+ }
+ 
+-#if !defined(ARCH_CPU_ARM64)
++#if !defined(ARCH_CPU_ARM_FAMILY)
+ namespace time_internal {
+ 
+ bool HasConstantRateTSC() {
+@@ -825,6 +826,6 @@ double TSCTicksPerSecond() {
+ }
+ 
+ }  // namespace time_internal
+-#endif  // defined(ARCH_CPU_ARM64)
++#endif  // defined(ARCH_CPU_ARM_FAMILY)
+ 
+ }  // namespace base
+diff --git a/base/win/dllmain.cc b/base/win/dllmain.cc
+index 0c5546fb..2b62bbc0 100644
+--- a/base/win/dllmain.cc
++++ b/base/win/dllmain.cc
+@@ -42,7 +42,8 @@ static bool linker_notifications_are_active = false;
+ // callbacks.
+ static void NTAPI on_callback(PVOID h, DWORD reason, PVOID reserved);
+ 
+-#ifdef _WIN64
++// Rhénium : pas de souligné initial sur ARM32 non plus, seul x86 décore.
++#if defined(_WIN64) || defined(_M_ARM)
+ 
+ #pragma comment(linker, "/INCLUDE:_tls_used")
+ #pragma comment(linker, "/INCLUDE:p_thread_callback_dllmain_typical_entry")
+diff --git a/base/win/registry.cc b/base/win/registry.cc
+index 4b3c3d75..1ea98d83 100644
+--- a/base/win/registry.cc
++++ b/base/win/registry.cc
+@@ -16,8 +16,10 @@
+ #include "base/check_op.h"
+ #include "base/containers/fixed_flat_map.h"
+ #include "base/functional/callback.h"
++#include "base/base_paths.h"
+ #include "base/native_library.h"
+ #include "base/notreached.h"
++#include "base/path_service.h"
+ #include "base/strings/string_piece.h"
+ #include "base/strings/string_util.h"
+ #include "base/strings/string_util_win.h"
+@@ -48,6 +50,30 @@ constexpr REGSAM kWow64AccessMask = KEY_WOW64_32KEY | KEY_WOW64_64KEY;
+ 
+ constexpr DWORD kInvalidIterValue = static_cast<DWORD>(-1);
+ 
++#if defined(WINUWP)
++// Rhénium : une app UWP ne peut pas écrire dans HKCU. HKEY_CURRENT_USER est
++// redirigé vers une ruche privée (RegLoadAppKey) rangée dans LocalState.
++HKEY RedirectRootKey(HKEY root_key) {
++  if (root_key != HKEY_CURRENT_USER)
++    return root_key;
++  static HKEY user_hive = [] {
++    FilePath dir;
++    HKEY hive = nullptr;
++    if (!PathService::Get(DIR_LOCAL_APP_DATA, &dir) ||
++        ::RegLoadAppKeyW(dir.Append(L"hkcu.dat").value().c_str(), &hive,
++                         KEY_ALL_ACCESS, 0, 0) != ERROR_SUCCESS) {
++      hive = nullptr;
++    }
++    return hive;
++  }();
++  return user_hive ? user_hive : root_key;
++}
++#else
++inline HKEY RedirectRootKey(HKEY root_key) {
++  return root_key;
++}
++#endif
++
+ }  // namespace
+ 
+ namespace internal {
+@@ -65,9 +91,9 @@ class Standard {
+                                       lpSecurityAttributes,
+                                   PHKEY phkResult,
+                                   LPDWORD lpdwDisposition) {
+-    return ::RegCreateKeyExW(hKey, lpSubKey, Reserved, lpClass, dwOptions,
+-                             samDesired, lpSecurityAttributes, phkResult,
+-                             lpdwDisposition);
++    return ::RegCreateKeyExW(RedirectRootKey(hKey), lpSubKey, Reserved, lpClass,
++                             dwOptions, samDesired, lpSecurityAttributes,
++                             phkResult, lpdwDisposition);
+   }
+ 
+   static inline LSTATUS OpenKey(HKEY hKey,
+@@ -75,14 +101,16 @@ class Standard {
+                                 DWORD ulOptions,
+                                 REGSAM samDesired,
+                                 PHKEY phkResult) {
+-    return ::RegOpenKeyExW(hKey, lpSubKey, ulOptions, samDesired, phkResult);
++    return ::RegOpenKeyExW(RedirectRootKey(hKey), lpSubKey, ulOptions,
++                           samDesired, phkResult);
+   }
+ 
+   static inline LSTATUS DeleteKey(HKEY hKey,
+                                   LPCWSTR lpSubKey,
+                                   REGSAM samDesired,
+                                   DWORD Reserved) {
+-    return ::RegDeleteKeyExW(hKey, lpSubKey, samDesired, Reserved);
++    return ::RegDeleteKeyExW(RedirectRootKey(hKey), lpSubKey, samDesired,
++                             Reserved);
+   }
+ 
+   static inline LSTATUS QueryInfoKey(HKEY hKey,
+@@ -298,24 +326,25 @@ class ExportDerived {
+       return true;
+     }
+ 
+-    static const auto kMap =
+-        base::MakeFixedFlatMapSorted<base::StringPiece, void**>({
+-            {"RegCloseKey", reinterpret_cast<void**>(&reg_close_key_)},
+-            {"RegCreateKeyExW", reinterpret_cast<void**>(&reg_create_key_ex_)},
+-            {"RegDeleteKeyExW", reinterpret_cast<void**>(&reg_delete_key_ex_)},
+-            {"RegDeleteValueW", reinterpret_cast<void**>(&reg_delete_value_)},
+-            {"RegEnumKeyExW", reinterpret_cast<void**>(&reg_enum_key_ex_)},
+-            {"RegEnumValueW", reinterpret_cast<void**>(&reg_enum_value_)},
+-            {"RegOpenKeyExW", reinterpret_cast<void**>(&reg_open_key_ex_)},
+-            {"RegQueryInfoKeyW",
+-             reinterpret_cast<void**>(&reg_query_info_key_)},
+-            {"RegQueryValueExW",
+-             reinterpret_cast<void**>(&reg_query_value_ex_)},
+-            {"RegSetValueExW", reinterpret_cast<void**>(&reg_set_value_ex_)},
+-        });
+-
+-    auto* entry = kMap.find(name);
+-    if (entry == kMap.end()) {
++    // Rhénium : tableau simple, fixed_flat_map suppose des itérateurs
++    // std::array qui sont des pointeurs (libc++), pas ceux de la STL MSVC.
++    static const std::pair<base::StringPiece, void**> kMap[] = {
++        {"RegCloseKey", reinterpret_cast<void**>(&reg_close_key_)},
++        {"RegCreateKeyExW", reinterpret_cast<void**>(&reg_create_key_ex_)},
++        {"RegDeleteKeyExW", reinterpret_cast<void**>(&reg_delete_key_ex_)},
++        {"RegDeleteValueW", reinterpret_cast<void**>(&reg_delete_value_)},
++        {"RegEnumKeyExW", reinterpret_cast<void**>(&reg_enum_key_ex_)},
++        {"RegEnumValueW", reinterpret_cast<void**>(&reg_enum_value_)},
++        {"RegOpenKeyExW", reinterpret_cast<void**>(&reg_open_key_ex_)},
++        {"RegQueryInfoKeyW", reinterpret_cast<void**>(&reg_query_info_key_)},
++        {"RegQueryValueExW", reinterpret_cast<void**>(&reg_query_value_ex_)},
++        {"RegSetValueExW", reinterpret_cast<void**>(&reg_set_value_ex_)},
++    };
++
++    const auto* entry = std::find_if(
++        std::begin(kMap), std::end(kMap),
++        [name](const auto& item) { return item.first == name; });
++    if (entry == std::end(kMap)) {
+       return true;
+     }
+ 
+@@ -325,7 +354,7 @@ class ExportDerived {
+     }
+ 
+     bool& fully_resolved = *static_cast<bool*>(cookie);
+-    fully_resolved = num_init_functions == kMap.size();
++    fully_resolved = num_init_functions == std::size(kMap);
+     return !fully_resolved;
+   }
+ 
+@@ -976,8 +1005,8 @@ void RegistryValueIterator::Initialize(HKEY root_key,
+                                        const wchar_t* folder_key,
+                                        REGSAM wow64access) {
+   DCHECK_EQ(wow64access & ~kWow64AccessMask, static_cast<REGSAM>(0));
+-  LONG result =
+-      RegOpenKeyEx(root_key, folder_key, 0, KEY_READ | wow64access, &key_);
++  LONG result = RegOpenKeyEx(RedirectRootKey(root_key), folder_key, 0,
++                             KEY_READ | wow64access, &key_);
+   if (result != ERROR_SUCCESS) {
+     key_ = nullptr;
+   } else {
+@@ -1120,8 +1149,8 @@ void RegistryKeyIterator::Initialize(HKEY root_key,
+                                      const wchar_t* folder_key,
+                                      REGSAM wow64access) {
+   DCHECK_EQ(wow64access & ~kWow64AccessMask, static_cast<REGSAM>(0));
+-  LONG result =
+-      RegOpenKeyEx(root_key, folder_key, 0, KEY_READ | wow64access, &key_);
++  LONG result = RegOpenKeyEx(RedirectRootKey(root_key), folder_key, 0,
++                             KEY_READ | wow64access, &key_);
+   if (result != ERROR_SUCCESS) {
+     key_ = nullptr;
+   } else {
+diff --git a/base/win/windows_version.cc b/base/win/windows_version.cc
+index 04bd7ae0..5c485cf0 100644
+--- a/base/win/windows_version.cc
++++ b/base/win/windows_version.cc
+@@ -26,7 +26,8 @@
+ #error VS 2017 Update 3.2 or higher is required
+ #endif
+ 
+-#if !defined(NTDDI_WIN10_NI)
++// Rhénium : WINUWP ARM32 impose le SDK 10.0.19041, le dernier avec les bibliothèques ARM32.
++#if !defined(NTDDI_WIN10_NI) && !defined(WINUWP)
+ #error Windows 10.0.22621.0 SDK or higher required.
+ #endif
+ 

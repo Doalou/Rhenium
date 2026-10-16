@@ -23,13 +23,13 @@ Les résultats s'affichent à l'écran, sont copiables (bouton « Copier les ré
 
 ## Prérequis
 
-| Élément | État sur la machine de dev | À faire |
-| --- | --- | --- |
-| Toolset MSVC 14.44 (dernier avec cible ARM32) | Installé | — |
-| Windows SDK avec bibliothèques ARM32 | 10.0.19041 installé (`winget install Microsoft.WindowsSDK.10.0.19041`) | — |
-| clang-cl + lld-link | LLVM 23.1.3 (`winget install LLVM.LLVM`) | — |
-| Rust nightly + rust-src | rustup (`winget install Rustlang.Rustup`) puis `rustup toolchain install nightly --profile minimal --component rust-src` | — |
-| WinAppDeployCmd, MakeAppx, SignTool, MakePri | Installés (SDK 10.0.26100) | — |
+| Élément | Installation sur la machine de dev |
+| --- | --- |
+| Toolset MSVC 14.44 (dernier avec cible ARM32) | Installé avec Visual Studio |
+| Windows SDK avec bibliothèques ARM32 | 10.0.19041 (`winget install Microsoft.WindowsSDK.10.0.19041`) |
+| clang-cl + lld-link | LLVM 23.1.3 (`winget install LLVM.LLVM`) |
+| Rust nightly + rust-src | rustup (`winget install Rustlang.Rustup`) puis `rustup toolchain install nightly --profile minimal --component rust-src` |
+| WinAppDeployCmd, MakeAppx, SignTool, MakePri | SDK 10.0.26100 (WinAppDeployCmd du SDK 10.0.19041 pour W10M) |
 
 ## Préparer le téléphone
 
@@ -50,6 +50,19 @@ Les résultats s'affichent à l'écran, sont copiables (bouton « Copier les ré
 Lancer « Sonde Rhénium » sur le téléphone, puis « Tester le remplissage mémoire ». L'app garde l'écran allumé tant qu'elle est ouverte (un verrouillage suspendrait les tests). Chaque série de tests écrit une copie horodatée `sonde-AAAAMMJJ-HHMMSS.txt` dans `Phone\Downloads\` (sous-dossier de l'app), visible depuis le PC par USB. Débrancher et rebrancher le câble si le fichier n'apparaît pas : le cache MTP de Windows ne se rafraîchit pas tout seul.
 
 Avec un téléphone branché en USB, `deploy.ps1 -Ip 127.0.0.1` fonctionne directement (service IpOverUsb). Il utilise le WinAppDeployCmd du SDK 10.0.19041 : ceux des SDK Windows 11 échouent avec W10M (0x80070003).
+
+### Chromium //base
+
+`../j1-base/build-base.ps1` produit `rhenium_base.lib` (//base, ses dépendances et le test de fumée `../j1-base/gn/base_smoke.cc`). Deux paquets, à installer l'un après l'autre (même identité d'app) :
+
+```powershell
+./build.ps1 -WithBase                                         # out\RheniumSonde_arm-clang-base.appx (+ .exe)
+./build.ps1 -ImportCheck out\RheniumSonde_arm-clang-base.exe  # out\RheniumSonde_arm-msvc-imports.appx
+./deploy.ps1 -Ip 127.0.0.1 -Appx out\RheniumSonde_arm-msvc-imports.appx   # 1. vérifie les imports
+./deploy.ps1 -Ip 127.0.0.1 -Appx out\RheniumSonde_arm-clang-base.appx     # 2. test de fumée
+```
+
+La sonde « imports » vérifie sur le téléphone chacun des imports de la build //base. Un manque « bloquant » empêche celle-ci de démarrer ; un manque « différé » (DLL de bureau en `/DELAYLOAD` : user32, ole32, oleaut32, shlwapi, dbghelp…) ne fait échouer que l'appel. Le test de fumée tourne sur un thread après l'affichage, et son rapport s'ajoute à la section « Chromium //base » : système, horloges, chemins, fichiers, JSON, registre (ruche privée), processus (refusé), `RunLoop`, `base::Thread`, `ThreadPool`. Ensuite, sur le thread XAML, la section « Chromium //base sur le thread UI » vérifie la pompe `CoreDispatcher` : tâche postée depuis le ThreadPool, tâche différée, `RunLoop` imbriqué.
 
 Le paquet est signé avec un certificat de développement local (`certs\`, créé au premier build, hors du magasin de certificats Windows). Si le téléphone le refuse, installer `certs\RheniumDev.cer` sur le téléphone.
 

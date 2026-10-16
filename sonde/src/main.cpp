@@ -54,7 +54,7 @@
 #include "a32_probe.h"  // ..\j1\app : code A32 assemblé depuis a32_probe.s
 #endif
 
-#if SONDE_V8
+#if SONDE_V8 || SONDE_BASE
 #include <chrono>
 #endif
 
@@ -261,10 +261,10 @@ void TestApiSets() {
 #if SONDE_IMPORT_CHECK
 #include "import_check.h"  // généré par build.ps1 -ImportCheck
 
-// Vérifie chaque import d'un autre exe (la build V8) : DLL hôte (via le schéma des api sets),
-// chargement, puis export. Le premier manque explique un exe qui ne démarre pas.
+// Vérifie chaque import d'un autre exe (build V8 ou //base) : DLL hôte (via le schéma des api
+// sets), chargement, puis export. Un manque hors chargement différé empêche cet exe de démarrer.
 void TestImports() {
-  Section(L"Imports de la build V8");
+  Section(L"Imports de l'exe vérifié");
   auto const* teb = reinterpret_cast<uint8_t const*>(NtCurrentTeb());
   auto const* peb = *reinterpret_cast<uint8_t const* const*>(teb + 0x30);
   auto const* map = *reinterpret_cast<ApiSetNamespace const* const*>(peb + 0x38);
@@ -272,33 +272,38 @@ void TestImports() {
   auto loadLibrary = reinterpret_cast<LoadLibraryWFn>(GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), "LoadLibraryW"));
 
   int missing = 0;
+  int missingDelayed = 0;
   std::wstring lastDll;
   for (auto const& import : kImportsToCheck) {
     std::wstring dll(to_hstring(import.dll));
+    std::wstring const label = import.delayed ? L"(différé) " + dll : dll;
+    int& count = import.delayed ? missingDelayed : missing;
     std::wstring host = dll;
     if (_wcsnicmp(dll.c_str(), L"api-", 4) == 0 || _wcsnicmp(dll.c_str(), L"ext-", 4) == 0) {
       host = ApiSetHost(map, dll.substr(0, dll.size() - 4));  // sans « .dll »
       if (host.empty() || host == L"(vide)") {
-        if (dll != lastDll) Line(dll, L"ABSENT du schéma ou sans hôte");
+        if (dll != lastDll) Line(label, L"ABSENT du schéma ou sans hôte");
         lastDll = dll;
-        ++missing;
+        ++count;
         continue;
       }
     }
     HMODULE module = GetModuleHandleW(host.c_str());
     if (!module && loadLibrary) module = loadLibrary(host.c_str());
     if (!module) {
-      if (dll != lastDll) Line(dll + L" -> " + host, L"hôte NON CHARGEABLE (" + std::to_wstring(GetLastError()) + L")");
+      if (dll != lastDll) Line(label + L" -> " + host, L"hôte NON CHARGEABLE (" + std::to_wstring(GetLastError()) + L")");
       lastDll = dll;
-      ++missing;
+      ++count;
       continue;
     }
-    if (!GetProcAddress(module, import.function)) {
-      Line(dll + L" -> " + host, L"export ABSENT : " + std::wstring(to_hstring(import.function)));
-      ++missing;
+    char const* function = import.function[0] == '#' ? MAKEINTRESOURCEA(atoi(import.function + 1)) : import.function;
+    if (!GetProcAddress(module, function)) {
+      Line(label + L" -> " + host, L"export ABSENT : " + std::wstring(to_hstring(import.function)));
+      ++count;
     }
   }
-  Line(L"Imports vérifiés", std::to_wstring(ARRAYSIZE(kImportsToCheck)) + L", manquants : " + std::to_wstring(missing));
+  Line(L"Imports vérifiés", std::to_wstring(ARRAYSIZE(kImportsToCheck)) + L", manquants : " + std::to_wstring(missing) +
+                                L" bloquants, " + std::to_wstring(missingDelayed) + L" en chargement différé");
 }
 #endif
 
@@ -915,6 +920,77 @@ void StartV8(TextBlock const& results) {
 #endif
 
 // ---------------------------------------------------------------------------
+// Chromium //base : test de fumée (..\j1-base\gn\base_smoke.cc) lié quand build.ps1 reçoit
+// -WithBase. Lancé sur un thread après l'affichage de la fenêtre, comme V8.
+
+#if SONDE_BASE
+extern "C" char const* rhenium_base_version();
+extern "C" int rhenium_base_smoke(void (*step)(char const*), char* out, int out_size);
+extern "C" void rhenium_base_ui_test(void (*step)(char const*), void (*done)(char const*, int));
+void Finish();
+
+TextBlock g_baseResults{nullptr};
+
+// Appelé sur le thread UI par une tâche //base, à la fin du test UI.
+void BaseUiDone(char const* text, int failures) {
+  Section(L"Chromium //base sur le thread UI (CoreDispatcher)");
+  g_report += std::wstring(to_hstring(text));
+  Line(L"Échecs", std::to_wstring(failures));
+  if (g_baseResults) g_baseResults.Text(g_report);
+  Finish();
+}
+
+struct BaseJob {
+  Windows::UI::Core::CoreDispatcher dispatcher{nullptr};
+  TextBlock results{nullptr};
+  char out[16 * 1024] = {};
+  int failures = 0;
+  long long ms = 0;
+};
+
+void BaseStep(char const* what) {
+  Step(std::wstring(to_hstring(what)));
+}
+
+DWORD WINAPI BaseThread(void* param) {
+  auto* job = static_cast<BaseJob*>(param);
+  auto const start = std::chrono::steady_clock::now();
+  job->failures = rhenium_base_smoke(&BaseStep, job->out, sizeof(job->out));
+  job->ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+  job->dispatcher.RunAsync(Windows::UI::Core::CoreDispatcherPriority::Normal, [job] {
+    g_report += std::wstring(to_hstring(job->out));
+    Line(L"Échecs", std::to_wstring(job->failures) + L" (" + std::to_wstring(job->ms) + L" ms)");
+    job->results.Text(g_report);
+    Finish();
+    g_baseResults = job->results;
+    delete job;
+    Step(L"base UI");
+    rhenium_base_ui_test(&BaseStep, &BaseUiDone);
+  });
+  return 0;
+}
+
+void StartBase(TextBlock const& results) {
+  Section(L"Chromium //base");
+  Line(L"Version", std::wstring(to_hstring(rhenium_base_version())));
+  auto* job = new BaseJob;
+  job->dispatcher = Window::Current().Dispatcher();
+  job->results = results;
+  results.Text(g_report + L"Statut : en cours…\n");
+  Finish();
+  HANDLE thread = CreateThread(nullptr, 1024 * 1024, &BaseThread, job, 0, nullptr);
+  if (!thread) {
+    Line(L"CreateThread", LastError());
+    results.Text(g_report);
+    Finish();
+    delete job;
+    return;
+  }
+  CloseHandle(thread);
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // Rust : bibliothèque statique (rust\src\lib.rs) liée quand build.ps1 reçoit -WithRust.
 
 #if SONDE_RUST
@@ -962,7 +1038,7 @@ void RunAll() {
 #endif
   Line(L"Résultats", L"Téléchargements\\sonde-*.txt et " + g_folder + L"\\resultats.txt");
   if (!g_previous.empty() && g_previous.rfind(L"Terminé", 0) != 0) {
-    Line(L"Lancement précédent", L"interrompu — " + g_previous.substr(0, g_previous.find(L'\n')));
+    Line(L"Lancement précédent", L"interrompu : " + g_previous.substr(0, g_previous.find(L'\n')));
   }
 
   Guarded(L"Appareil", TestDevice);
@@ -1051,6 +1127,9 @@ struct App : ApplicationT<App> {
       }
     }
     window.Activate();
+#if SONDE_BASE
+    if (results) Guarded(L"base", [&] { StartBase(results); });
+#endif
 #if SONDE_V8
     if (results) Guarded(L"V8", [&] { StartV8(results); });  // en dernier : V8 peut tuer l'app
 #endif

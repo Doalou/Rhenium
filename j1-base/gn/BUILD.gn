@@ -1,0 +1,13 @@
+# Racine de Rhénium, copiée en ..\chromium\src\BUILD.gn par build-base.ps1.
+
+group("rhenium") {
+  deps = [ ":rhenium_base" ]
+}
+
+# //base, ses dépendances et le test de fumée en une seule bibliothèque,
+# liée par la sonde (..\sonde\build.ps1 -WithBase).
+static_library("rhenium_base") {
+  complete_static_lib = true
+  sources = [ "rhenium/base_smoke.cc" ]
+  deps = [ "//base" ]
+}
