@@ -2,7 +2,7 @@
 
 Objectif : compiler `//base` de Chromium M116 pour Windows 10 Mobile (ARM32, app UWP) avec la toolchain validée pour V8, puis le faire tourner sur le Lumia : threads, tâches, horloges, fichiers, JSON, et une boucle de messages branchée sur le thread XAML. C'est la seconde moitié du jalon J1 « Fondations » du cahier des charges, après V8 (`..\j1`).
 
-Statut au 2026-10-16 : **`base.lib` se construit** pour Windows 10 Mobile ARM32 (option B : en-têtes de bureau, imports vérifiés sur le téléphone). Chemins, registre et processus sont adaptés à la source. **Étapes 4 et 5 atteintes le 2026-10-16** : //base tourne sur le Lumia 950 (W10M 15254.603), test de fumée sans échec, aucun import bloquant manquant, et la boucle UI passe par le `CoreDispatcher` (tâches, tâches différées et `RunLoop` imbriqué sur le thread XAML). Plus aucun import de USER32.
+Statut au 2026-10-16 : **`base.lib` se construit** pour Windows 10 Mobile ARM32 (option B : en-têtes de bureau, imports vérifiés sur le téléphone). Chemins, registre et processus sont adaptés à la source. **J1 atteint le 2026-10-16** : //base tourne sur le Lumia 950 (W10M 15254.603). Test de fumée sans échec, aucun import bloquant manquant, boucle UI sur le `CoreDispatcher` (tâches, tâches différées et `RunLoop` imbriqué sur le thread XAML), plus aucun import de USER32, et **1 201 tests de `base_unittests` sur 1 201 réussis** (étape 6, ci-dessous).
 
 ## Utilisation
 
@@ -10,7 +10,9 @@ Statut au 2026-10-16 : **`base.lib` se construit** pour Windows 10 Mobile ARM32 
 ./fetch.ps1                    # sources dans ..\chromium\src (dépôt git local de référence, branche origine)
 ./fetch.ps1 -Missing <chemin>  # ajoute le dossier d'un fichier réclamé par gn gen
 ./build-base.ps1 -GenOnly      # correctifs de patches\, racine GN minimale (gn\), args.gn, gn gen
-./build-base.ps1               # + ninja base
+./build-base.ps1               # + ninja : rhenium_base.lib (//base + test de fumée), bibliothèques de tests
+..\sonde\build.ps1 -WithBase   # sonde avec //base, test de fumée et test du thread UI
+..\sonde\build.ps1 -BaseTests  # sonde avec le sous-ensemble de base_unittests
 ```
 
 ## Étape 1 : ce qui a été fait
@@ -135,9 +137,32 @@ Conséquence pour l'étape 5 : `MessagePumpForUI` ne peut pas s'appuyer sur une 
 | ThreadPool, threads COM STA | Sans file de messages : attente simple sur l'événement de réveil |
 | Moniteur d'énergie | Fenêtre cachée et `WM_POWERBROADCAST` neutralisés ; à refaire avec `Windows.System.Power` |
 
-La pompe exige une `CoreWindow` sur le thread qui la crée : un `base::Thread` de type UI ailleurs que sur le thread XAML s'arrête sur un `CHECK`.
+Sur un thread sans `CoreWindow` (un `base::Thread` de type UI, les tests), la pompe délègue tout à une `MessagePumpDefault` : ni fenêtre ni dispatcher, `Run()` attend sur un événement comme les autres threads.
 
 Résultats sur le Lumia (test `rhenium_base_ui_test`, lancé dans `OnLaunched`) : 0 échec. Tâche postée du ThreadPool vers le thread UI exécutée sur le bon thread ; `PostDelayedTask` de 50 ms en 87,8 ms (au démarrage, pendant le premier rendu XAML : la précision du `ThreadPoolTimer` sera à mesurer à froid) ; `RunLoop` imbriqué de 20 ms en 27,7 ms, tâche interne exécutée.
+
+## Étape 6 : base_unittests sur le Lumia
+
+Critère de sortie de J1 (« tests base et V8 au vert sur appareil »). `//base/test:test_support` tire ICU et libxml en entier : à la place, deux bibliothèques dans `gn\BUILD.gn`.
+- `rhenium_base_tests` (complète) : //base, gtest, gmock, les aides de `base/test/` dont les tests ont besoin et l'exécuteur `gn\base_tests.cc`.
+- `rhenium_base_unittests` : 51 fichiers `*_unittest.cc` de //base (chaînes, conteneurs, JSON, `Value`, fichiers, chemins, fonctions et callbacks, mémoire, threads, synchronisation, `RunLoop`, `SingleThreadTaskExecutor`, minuteurs, hachages, version de Windows…). La sonde la lie en entier (`/WHOLEARCHIVE`), sinon l'éditeur de liens écarte les tests, que rien ne référence.
+
+L'exécuteur tourne sur un thread de la sonde. Sans processus enfants, un test qui plante tue l'app : chaque test est noté dans `LocalState\base-tests.txt` avant de démarrer, avec les messages `CHECK`/`LOG(ERROR)` et les exceptions matérielles (adresse relative à l'exe). Au lancement suivant, un test resté « en cours » compte comme planté et est sauté. Le bilan est exporté avant de relancer les tests.
+
+Corrections apportées par les tests :
+
+| Constat | Correctif |
+| --- | --- |
+| `SetCurrentThreadQualityOfService` (W10M 15254 = RS3) appelait `SetThreadInformation` sans vérifier qu'il l'avait trouvée dans kernel32 : appel à l'adresse nulle dès qu'un thread change de priorité | Recherche dans kernel32 puis kernelbase, et rien si absente (`SetThreadDescription` aussi) |
+| La pompe UI s'arrêtait sur un `CHECK` sur un thread sans `CoreWindow` | Repli sur `MessagePumpDefault` |
+| Tests de mort : ils exigent un processus enfant | Désactivés dans gtest sous `WINUWP` (`GTEST_HAS_DEATH_TEST`, comme sur iOS) |
+| `OSInfo.GetWowStatusForProcess` n'a pas de cas ARM32 | Branche ARM32 ajoutée au test (`IsWowDisabled`), vérifiée sur le téléphone |
+| `values_unittest` : taille de `base::Value` prévue pour libc++ | Taille calculée pour la STL MSVC |
+| Tests de la pompe HWND (`SetTimer`, `PostMessage`) dans `single_thread_task_executor_unittest` | Exclus sous `WINUWP` |
+
+Exclus d'office, sans objet sur le téléphone : `fixed_flat_map_unittest` (suppose libc++), `CheckDbgHelpVersion` (dbghelp absent de System32), `PathServiceTest.Get` et `GetProgramFiles` (ni bureau ni Program Files pour une app), `JSONReaderTest.ReadFromFile` (données de test absentes), tests multiprocessus et `DISABLED_`.
+
+**Résultat le 2026-10-16 : 1 201 tests sur 1 201 réussis, en un seul lancement de 29,5 s.**
 
 ## Imports de bureau restants
 

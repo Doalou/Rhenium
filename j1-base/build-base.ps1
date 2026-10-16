@@ -5,6 +5,7 @@
 .EXAMPLE
   ./build-base.ps1 -GenOnly   # correctifs, racine GN, args.gn, gn gen
   ./build-base.ps1            # + ninja : obj\rhenium_base.lib (//base, dépendances, test de fumée)
+                              #   et obj\rhenium_base_tests.lib + rhenium_base_unittests.lib (sous-ensemble de base_unittests)
 #>
 param(
   [string] $Src = "$PSScriptRoot\..\chromium\src",
@@ -41,7 +42,7 @@ foreach ($patch in Get-ChildItem "$PSScriptRoot\patches\*.patch" -ErrorAction Si
 Copy-Item "$PSScriptRoot\gn\dot.gn" "$Src\.gn" -Force
 Copy-Item "$PSScriptRoot\gn\BUILD.gn" "$Src\BUILD.gn" -Force
 New-Item -ItemType Directory -Force "$Src\rhenium" | Out-Null
-Copy-Item "$PSScriptRoot\gn\base_smoke.cc" "$Src\rhenium\base_smoke.cc" -Force
+Copy-Item "$PSScriptRoot\gn\base_smoke.cc", "$PSScriptRoot\gn\base_tests.cc" "$Src\rhenium\" -Force
 
 # Jonction vers LLVM sur le lecteur du projet : le GN de 2023 ne gère pas un autre lecteur.
 $llvmLink = Join-Path $root 'toolchains\llvm'
@@ -91,6 +92,6 @@ try {
   }
   Write-Host "$($output | Select-Object -Last 1)"
   if ($GenOnly) { return }
-  cmd /c "`"$root\v8\third_party\ninja\ninja.exe`" -C $OutDir rhenium_base < NUL"
+  cmd /c "`"$root\v8\third_party\ninja\ninja.exe`" -C $OutDir rhenium_base rhenium_base_tests rhenium_base_unittests < NUL"
   if ($LASTEXITCODE -ne 0) { throw "ninja a échoué (code $LASTEXITCODE)" }
 } finally { Pop-Location }

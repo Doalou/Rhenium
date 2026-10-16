@@ -12,6 +12,7 @@
                                   # implique -Compiler clang, ARM32 seulement
   ./build.ps1 -WithBase           # lie Chromium //base (..\chromium\src\out\uwp-arm\obj\rhenium_base.lib, voir
                                   # ..\j1-base\build-base.ps1) et exécute son test de fumée ; clang, ARM32 seulement
+  ./build.ps1 -BaseTests          # sous-ensemble de base_unittests (rhenium_base_tests.lib), repris d'un lancement à l'autre
   ./build.ps1 -ImportCheck out\RheniumSonde_arm-clang-base.exe  # vérifie sur le téléphone les imports d'un autre exe
 #>
 param(
@@ -23,6 +24,7 @@ param(
   [switch] $WithV8,
   [int] $V8First = 0,  # avec -WithV8 : configuration V8 (base 0) du premier lancement après installation
   [switch] $WithBase,
+  [switch] $BaseTests,  # avec -WithBase implicite : sous-ensemble de base_unittests au lieu du test de fumée
   [string] $ImportCheck,  # exe dont la sonde vérifiera chaque import sur le téléphone (DLL hôte + export)
   [string] $ClangDir  # dossier contenant clang-cl.exe et lld-link.exe, sinon recherche automatique
 )
@@ -34,6 +36,7 @@ if ($WithV8) {
   if ($Arch -ne 'arm') { throw '-WithV8 ne concerne que -Arch arm.' }
   $Compiler = 'clang'  # la cale V8 est compilée par clang-cl, comme V8
 }
+if ($BaseTests) { $WithBase = $true }
 if ($WithBase) {
   if ($Arch -ne 'arm') { throw '-WithBase ne concerne que -Arch arm.' }
   if ($WithV8) { throw '-WithBase et -WithV8 ne se combinent pas encore (deux copies de //base).' }
@@ -139,7 +142,7 @@ $codegen = if ($NoCodeGeneration) { 0 } else { 1 }
 $clangDefine = "/DSONDE_CLANG=$([int]($Compiler -eq 'clang'))"
 if ($WithA32 -and $Arch -ne 'arm') { throw '-WithA32 ne concerne que -Arch arm.' }
 $a32Flags = @(if ($WithA32) { '/DSONDE_A32=1', "/I$root\..\j1\app" } else { '/DSONDE_A32=0' })
-$a32Flags += "/DSONDE_V8=$([int][bool]$WithV8)", "/DSONDE_V8_FIRST=$V8First", "/DSONDE_BASE=$([int][bool]$WithBase)"
+$a32Flags += "/DSONDE_V8=$([int][bool]$WithV8)", "/DSONDE_V8_FIRST=$V8First", "/DSONDE_BASE=$([int][bool]$WithBase)", "/DSONDE_BASE_TESTS=$([int][bool]$BaseTests)"
 
 # Liste des imports d'un autre exe, vérifiés un par un par la sonde : une DLL ou un export
 # absent du téléphone empêche cet exe de démarrer, sans aucun message. Les imports en
@@ -214,12 +217,15 @@ if ($WithV8) {
 # téléphone ne bloque que l'appel, pas le démarrage (la vérification des imports les liste à part).
 $baseLibs = @()
 if ($WithBase) {
-  $baseLib = (Resolve-Path "$root\..").Path + '\chromium\src\out\uwp-arm\obj\rhenium_base.lib'
+  $baseLib = (Resolve-Path "$root\..").Path + '\chromium\src\out\uwp-arm\obj\' + $(if ($BaseTests) { 'rhenium_base_tests.lib' } else { 'rhenium_base.lib' })
   if (-not (Test-Path $baseLib)) { throw "//base n'est pas compilé : lancer ..\j1-base\build-base.ps1 ($baseLib absent)." }
   $desktopDlls = 'user32', 'gdi32', 'shell32', 'shlwapi', 'setupapi', 'dbghelp', 'oleaut32', 'ole32', 'advapi32',
     'powrprof', 'cfgmgr32', 'winmm', 'version', 'userenv', 'propsys', 'wbemuuid', 'ntdll'
-  $baseLibs = @($baseLib) + @($desktopDlls | ForEach-Object { "$_.lib" }) +
+  # Les tests ne sont référencés par rien : leur bibliothèque est liée en entier.
+  $baseLibs = @($baseLib) + $(if ($BaseTests) { "/WHOLEARCHIVE:$(Split-Path $baseLib)\rhenium_base_unittests.lib" }) + @($desktopDlls | ForEach-Object { "$_.lib" }) +
     @($desktopDlls | Where-Object { $_ -notin 'ntdll', 'wbemuuid' } | ForEach-Object { "/DELAYLOAD:$_.dll" }) +
+    # Api sets récents, chargés en différé comme dans Chromium (base/BUILD.gn) : peut-être absents de la 15254.
+    @('api-ms-win-core-realtime-l1-1-1', 'api-ms-win-core-version-l1-1-0', 'api-ms-win-core-version-l1-1-1' | ForEach-Object { "/DELAYLOAD:$_.dll" }) +
     @('delayimp.lib', "/LIBPATH:$msvc\lib\$Arch", '/ERRORLIMIT:0', "/MAP:$out\RheniumSonde.map")
   Write-Host "//base : $([math]::Round((Get-Item $baseLib).Length / 1MB)) Mo" -ForegroundColor Cyan
 }
@@ -252,7 +258,7 @@ Invoke-Tool "$sdkBin\makepri.exe" @('createconfig', '/cf', "$out\priconfig.xml",
 Invoke-Tool "$sdkBin\makepri.exe" @('new', '/pr', $pkg, '/cf', "$out\priconfig.xml", '/mn', "$pkg\AppxManifest.xml",
   '/of', "$pkg\resources.pri", '/o')
 
-$suffix = $(if ($WithRust) { '-rust' } else { '' }) + $(if ($WithA32) { '-a32' } else { '' }) + $(if ($WithV8) { '-v8' } else { '' }) + $(if ($WithBase) { '-base' } else { '' }) +
+$suffix = $(if ($WithRust) { '-rust' } else { '' }) + $(if ($WithA32) { '-a32' } else { '' }) + $(if ($WithV8) { '-v8' } else { '' }) + $(if ($BaseTests) { '-basetests' } elseif ($WithBase) { '-base' } else { '' }) +
   $(if ($ImportCheck) { '-imports' } else { '' }) +
   $(if ($NoCodeGeneration) { '_sans-codegen' } else { '' })
 $appx = "$root\out\RheniumSonde_$Arch-$Compiler$suffix.appx"

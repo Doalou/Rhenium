@@ -62,7 +62,9 @@ Avec un téléphone branché en USB, `deploy.ps1 -Ip 127.0.0.1` fonctionne direc
 ./deploy.ps1 -Ip 127.0.0.1 -Appx out\RheniumSonde_arm-clang-base.appx     # 2. test de fumée
 ```
 
-La sonde « imports » vérifie sur le téléphone chacun des imports de la build //base. Un manque « bloquant » empêche celle-ci de démarrer ; un manque « différé » (DLL de bureau en `/DELAYLOAD` : user32, ole32, oleaut32, shlwapi, dbghelp…) ne fait échouer que l'appel. Le test de fumée tourne sur un thread après l'affichage, et son rapport s'ajoute à la section « Chromium //base » : système, horloges, chemins, fichiers, JSON, registre (ruche privée), processus (refusé), `RunLoop`, `base::Thread`, `ThreadPool`. Ensuite, sur le thread XAML, la section « Chromium //base sur le thread UI » vérifie la pompe `CoreDispatcher` : tâche postée depuis le ThreadPool, tâche différée, `RunLoop` imbriqué.
+La sonde « imports » vérifie sur le téléphone chacun des imports de la build //base. Un manque « bloquant » empêche celle-ci de démarrer ; un manque « différé » (DLL de bureau en `/DELAYLOAD` : user32, ole32, oleaut32, shlwapi, dbghelp…) ne fait échouer que l'appel. `./build.ps1 -BaseTests` produit `out\RheniumSonde_arm-clang-basetests.appx`, qui exécute 1 201 tests de `base_unittests` (voir `../j1-base/README.md`, étape 6). Si un test tue l'app, la relancer suffit : elle saute ce test et reprend. Le bilan s'affiche dans la section « base_unittests ».
+
+Le test de fumée tourne sur un thread après l'affichage, et son rapport s'ajoute à la section « Chromium //base » : système, horloges, chemins, fichiers, JSON, registre (ruche privée), processus (refusé), `RunLoop`, `base::Thread`, `ThreadPool`. Ensuite, sur le thread XAML, la section « Chromium //base sur le thread UI » vérifie la pompe `CoreDispatcher` : tâche postée depuis le ThreadPool, tâche différée, `RunLoop` imbriqué.
 
 Le paquet est signé avec un certificat de développement local (`certs\`, créé au premier build, hors du magasin de certificats Windows). Si le téléphone le refuse, installer `certs\RheniumDev.cer` sur le téléphone.
 

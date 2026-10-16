@@ -1,7 +1,12 @@
 # Racine de Rhénium, copiée en ..\chromium\src\BUILD.gn par build-base.ps1.
 
 group("rhenium") {
-  deps = [ ":rhenium_base" ]
+  testonly = true
+  deps = [
+    ":rhenium_base",
+    ":rhenium_base_tests",
+    ":rhenium_base_unittests",
+  ]
 }
 
 # //base, ses dépendances et le test de fumée en une seule bibliothèque,
@@ -10,4 +15,97 @@ static_library("rhenium_base") {
   complete_static_lib = true
   sources = [ "rhenium/base_smoke.cc" ]
   deps = [ "//base" ]
+}
+
+# Exécuteur de base_unittests, //base et les aides de base/test/ dont les tests
+# ont besoin, liés par la sonde (..\sonde\build.ps1 -BaseTests). Sans
+# //base/test:test_support, qui tire ICU et libxml.
+static_library("rhenium_base_tests") {
+  testonly = true
+  complete_static_lib = true
+  sources = [
+    "//base/test/bind.cc",
+    "//base/test/copy_only_int.cc",
+    "//base/test/gtest_util.cc",
+    "//base/test/mock_entropy_provider.cc",
+    "//base/test/scoped_feature_list.cc",
+    "//base/test/scoped_run_loop_timeout.cc",
+    "//base/test/task_environment.cc",
+    "//base/test/test_mock_time_task_runner.cc",
+    "//base/test/test_pending_task.cc",
+    "//base/test/test_simple_task_runner.cc",
+    "//base/test/test_switches.cc",
+    "//base/test/test_timeouts.cc",
+    "//base/test/test_waitable_event.cc",
+    "rhenium/base_tests.cc",
+  ]
+  deps = [
+    "//base",
+    "//testing/gmock",
+    "//testing/gtest",
+  ]
+}
+
+# Sous-ensemble de base_unittests, seul dans sa bibliothèque : la sonde le lie
+# en entier (/WHOLEARCHIVE), sinon l'éditeur de liens écarte les tests, que
+# rien ne référence. fixed_flat_map_unittest est exclu : fixed_flat_map suppose
+# des itérateurs std::array qui sont des pointeurs (libc++), pas ceux de la STL
+# MSVC.
+static_library("rhenium_base_unittests") {
+  testonly = true
+  sources = [
+    "//base/base64_unittest.cc",
+    "//base/big_endian_unittest.cc",
+    "//base/bits_unittest.cc",
+    "//base/command_line_unittest.cc",
+    "//base/containers/circular_deque_unittest.cc",
+    "//base/containers/flat_map_unittest.cc",
+    "//base/containers/flat_set_unittest.cc",
+    "//base/containers/lru_cache_unittest.cc",
+    "//base/containers/small_map_unittest.cc",
+    "//base/containers/span_unittest.cc",
+    "//base/files/file_path_unittest.cc",
+    "//base/files/file_unittest.cc",
+    "//base/files/scoped_temp_dir_unittest.cc",
+    "//base/functional/bind_unittest.cc",
+    "//base/functional/callback_unittest.cc",
+    "//base/hash/hash_unittest.cc",
+    "//base/hash/md5_unittest.cc",
+    "//base/hash/sha1_unittest.cc",
+    "//base/json/json_reader_unittest.cc",
+    "//base/json/json_writer_unittest.cc",
+    "//base/json/string_escape_unittest.cc",
+    "//base/location_unittest.cc",
+    "//base/memory/ref_counted_unittest.cc",
+    "//base/memory/weak_ptr_unittest.cc",
+    "//base/observer_list_unittest.cc",
+    "//base/path_service_unittest.cc",
+    "//base/pickle_unittest.cc",
+    "//base/rand_util_unittest.cc",
+    "//base/run_loop_unittest.cc",
+    "//base/sequence_checker_unittest.cc",
+    "//base/strings/strcat_unittest.cc",
+    "//base/strings/string_number_conversions_unittest.cc",
+    "//base/strings/string_piece_unittest.cc",
+    "//base/strings/string_split_unittest.cc",
+    "//base/strings/string_util_unittest.cc",
+    "//base/strings/stringprintf_unittest.cc",
+    "//base/strings/utf_string_conversions_unittest.cc",
+    "//base/synchronization/condition_variable_unittest.cc",
+    "//base/synchronization/lock_unittest.cc",
+    "//base/synchronization/waitable_event_unittest.cc",
+    "//base/task/single_thread_task_executor_unittest.cc",
+    "//base/threading/platform_thread_unittest.cc",
+    "//base/threading/sequence_bound_unittest.cc",
+    "//base/threading/thread_local_storage_unittest.cc",
+    "//base/threading/thread_unittest.cc",
+    "//base/timer/timer_unittest.cc",
+    "//base/values_unittest.cc",
+    "//base/win/windows_version_unittest.cc",
+  ]
+  deps = [
+    "//base",
+    "//testing/gmock",
+    "//testing/gtest",
+  ]
 }

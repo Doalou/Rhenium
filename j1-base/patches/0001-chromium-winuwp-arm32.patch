@@ -357,3 +357,21 @@ index 6daa8144..4bdc3324 100644
  __pragma(comment(linker, "/INCLUDE:_tls_used"))
  __pragma(comment(
      linker, "/INCLUDE:" EXPAND_AND_STRINGIFY(p_thread_callback_boringssl)))
+diff --git a/third_party/googletest/src/googletest/include/gtest/internal/gtest-port.h b/third_party/googletest/src/googletest/include/gtest/internal/gtest-port.h
+index e178782c..3c0eb610 100644
+--- a/third_party/googletest/src/googletest/include/gtest/internal/gtest-port.h
++++ b/third_party/googletest/src/googletest/include/gtest/internal/gtest-port.h
+@@ -595,10 +595,12 @@ typedef struct _RTL_CRITICAL_SECTION GTEST_CRITICAL_SECTION;
+ #endif  // GTEST_HAS_STREAM_REDIRECTION
+ 
+ // Determines whether to support death tests.
++// Rhénium : pas sous UWP (WINUWP), qui ne peut pas créer de processus.
+ // pops up a dialog window that cannot be suppressed programmatically.
+ #if (GTEST_OS_LINUX || GTEST_OS_CYGWIN || GTEST_OS_SOLARIS ||             \
+      (GTEST_OS_MAC && !GTEST_OS_IOS) ||                                   \
+-     (GTEST_OS_WINDOWS_DESKTOP && _MSC_VER) || GTEST_OS_WINDOWS_MINGW ||  \
++     (GTEST_OS_WINDOWS_DESKTOP && _MSC_VER && !defined(WINUWP)) ||       \
++     GTEST_OS_WINDOWS_MINGW ||                                            \
+      GTEST_OS_AIX || GTEST_OS_HPUX || GTEST_OS_OPENBSD || GTEST_OS_QNX || \
+      GTEST_OS_FREEBSD || GTEST_OS_NETBSD || GTEST_OS_FUCHSIA ||           \
+      GTEST_OS_DRAGONFLY || GTEST_OS_GNU_KFREEBSD || GTEST_OS_HAIKU ||     \

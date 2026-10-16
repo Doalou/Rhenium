@@ -925,12 +925,19 @@ void StartV8(TextBlock const& results) {
 
 #if SONDE_BASE
 extern "C" char const* rhenium_base_version();
+#if SONDE_BASE_TESTS
+// ..\j1-base\gn\base_tests.cc : sous-ensemble de base_unittests, repris d'un lancement à l'autre.
+extern "C" int rhenium_base_tests(void (*step)(char const*), char* out, int out_size);
+extern "C" int rhenium_base_tests_state(char* out, int out_size);
+#else
 extern "C" int rhenium_base_smoke(void (*step)(char const*), char* out, int out_size);
 extern "C" void rhenium_base_ui_test(void (*step)(char const*), void (*done)(char const*, int));
+#endif
 void Finish();
 
 TextBlock g_baseResults{nullptr};
 
+#if !SONDE_BASE_TESTS
 // Appelé sur le thread UI par une tâche //base, à la fin du test UI.
 void BaseUiDone(char const* text, int failures) {
   Section(L"Chromium //base sur le thread UI (CoreDispatcher)");
@@ -939,11 +946,12 @@ void BaseUiDone(char const* text, int failures) {
   if (g_baseResults) g_baseResults.Text(g_report);
   Finish();
 }
+#endif
 
 struct BaseJob {
   Windows::UI::Core::CoreDispatcher dispatcher{nullptr};
   TextBlock results{nullptr};
-  char out[16 * 1024] = {};
+  char out[64 * 1024] = {};
   int failures = 0;
   long long ms = 0;
 };
@@ -955,7 +963,11 @@ void BaseStep(char const* what) {
 DWORD WINAPI BaseThread(void* param) {
   auto* job = static_cast<BaseJob*>(param);
   auto const start = std::chrono::steady_clock::now();
+#if SONDE_BASE_TESTS
+  job->failures = rhenium_base_tests(&BaseStep, job->out, sizeof(job->out));
+#else
   job->failures = rhenium_base_smoke(&BaseStep, job->out, sizeof(job->out));
+#endif
   job->ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
   job->dispatcher.RunAsync(Windows::UI::Core::CoreDispatcherPriority::Normal, [job] {
     g_report += std::wstring(to_hstring(job->out));
@@ -964,21 +976,34 @@ DWORD WINAPI BaseThread(void* param) {
     Finish();
     g_baseResults = job->results;
     delete job;
+#if !SONDE_BASE_TESTS
     Step(L"base UI");
     rhenium_base_ui_test(&BaseStep, &BaseUiDone);
+#endif
   });
   return 0;
 }
 
 void StartBase(TextBlock const& results) {
+#if SONDE_BASE_TESTS
+  Section(L"Chromium //base : base_unittests (sous-ensemble)");
+  {
+    // Bilan des lancements précédents, exporté avant que les tests ne puissent tuer l'app.
+    static char state[32 * 1024];
+    Step(L"bilan des tests précédents");
+    rhenium_base_tests_state(state, sizeof(state));
+    g_report += L"Avant ce lancement :\n" + std::wstring(to_hstring(state)) + L"Ce lancement :\n";
+  }
+#else
   Section(L"Chromium //base");
   Line(L"Version", std::wstring(to_hstring(rhenium_base_version())));
+#endif
   auto* job = new BaseJob;
   job->dispatcher = Window::Current().Dispatcher();
   job->results = results;
   results.Text(g_report + L"Statut : en cours…\n");
   Finish();
-  HANDLE thread = CreateThread(nullptr, 1024 * 1024, &BaseThread, job, 0, nullptr);
+  HANDLE thread = CreateThread(nullptr, 4 * 1024 * 1024, &BaseThread, job, 0, nullptr);
   if (!thread) {
     Line(L"CreateThread", LastError());
     results.Text(g_report);
