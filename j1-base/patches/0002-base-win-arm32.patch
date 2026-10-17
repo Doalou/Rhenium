@@ -1,8 +1,8 @@
 diff --git a/base/BUILD.gn b/base/BUILD.gn
-index 304223b5..851284e0 100644
+index 304223b58a..8d2a609c25 100644
 --- a/base/BUILD.gn
 +++ b/base/BUILD.gn
-@@ -2016,6 +2016,31 @@ component("base") {
+@@ -2016,6 +2016,32 @@ component("base") {
        # in generated build files.
        "//tools/win/DebugVisualizers/chrome.natvis",
      ]
@@ -23,8 +23,9 @@ index 304223b5..851284e0 100644
 +      ]
 +    }
 +
-+    # Rhénium : pas d'ATL pour ARM32, seuls des tests incluent win/atl.h.
-+    if (current_cpu == "arm") {
++    # Rhénium : ATL n'est installé que pour ARM32 (composant VC 14.44 ATL ARM),
++    # pas pour les outils de l'hôte.
++    if (current_cpu != "arm") {
 +      sources -= [
 +        "win/atl.h",
 +        "win/atl_throw.cc",
@@ -35,7 +36,7 @@ index 304223b5..851284e0 100644
  
    if (!is_win) {
 diff --git a/base/allocator/partition_allocator/partition_alloc_base/immediate_crash.h b/base/allocator/partition_allocator/partition_alloc_base/immediate_crash.h
-index 58f8cb60..e63d3c37 100644
+index 58f8cb6081..e63d3c37e9 100644
 --- a/base/allocator/partition_allocator/partition_alloc_base/immediate_crash.h
 +++ b/base/allocator/partition_allocator/partition_alloc_base/immediate_crash.h
 @@ -101,6 +101,12 @@
@@ -52,7 +53,7 @@ index 58f8cb60..e63d3c37 100644
  
  #define PA_TRAP_SEQUENCE1_() asm volatile("int3")
 diff --git a/base/allocator/partition_allocator/partition_alloc_base/time/time_win.cc b/base/allocator/partition_allocator/partition_alloc_base/time/time_win.cc
-index 43fa17d6..efb62b8b 100644
+index 43fa17d683..efb62b8b4f 100644
 --- a/base/allocator/partition_allocator/partition_alloc_base/time/time_win.cc
 +++ b/base/allocator/partition_allocator/partition_alloc_base/time/time_win.cc
 @@ -575,7 +575,8 @@ ThreadTicks ThreadTicks::GetForThread(
@@ -101,7 +102,7 @@ index 43fa17d6..efb62b8b 100644
  
  }  // namespace partition_alloc::internal::base
 diff --git a/base/allocator/partition_allocator/partition_tls_win.cc b/base/allocator/partition_allocator/partition_tls_win.cc
-index 5f1b161a..7f46ea24 100644
+index 5f1b161a1e..7f46ea249d 100644
 --- a/base/allocator/partition_allocator/partition_tls_win.cc
 +++ b/base/allocator/partition_allocator/partition_tls_win.cc
 @@ -68,7 +68,8 @@ void PartitionTlsSetOnDllProcessDetach(void (*callback)()) {
@@ -115,7 +116,7 @@ index 5f1b161a..7f46ea24 100644
  #pragma comment(linker, "/INCLUDE:_tls_used")
  #pragma comment(linker, "/INCLUDE:partition_tls_thread_exit_callback")
 diff --git a/base/base_paths_win.cc b/base/base_paths_win.cc
-index 3ac45e74..5da42fcd 100644
+index 3ac45e7466..5da42fcd87 100644
 --- a/base/base_paths_win.cc
 +++ b/base/base_paths_win.cc
 @@ -17,10 +17,92 @@
@@ -218,8 +219,55 @@ index 3ac45e74..5da42fcd 100644
 +#endif  // defined(WINUWP)
  
  }  // namespace base
+diff --git a/base/containers/contiguous_iterator.h b/base/containers/contiguous_iterator.h
+index 18bd0a8403..a49354d51c 100644
+--- a/base/containers/contiguous_iterator.h
++++ b/base/containers/contiguous_iterator.h
+@@ -75,6 +75,17 @@ struct IsCheckedContiguousIter
+           std::is_same<T, base::CheckedContiguousConstIterator<ValueT>>,
+           std::is_same<T, base::CheckedContiguousIterator<ValueT>>> {};
+ 
++// Rhénium : les itérateurs de la STL MSVC portent la taille du std::array dans
++// leur type, que IsArrayIter ne reconnaît donc pas ; le concept C++20 suffit.
++#if defined(_MSVC_STL_VERSION)
++template <typename T>
++struct IsMsvcStlContiguousIter
++    : std::bool_constant<std::contiguous_iterator<T>> {};
++#else
++template <typename T>
++struct IsMsvcStlContiguousIter : std::false_type {};
++#endif
++
+ // Check that the iterator points to an actual object, and is one of the
+ // iterator types mentioned above.
+ template <typename T, bool B = PointsToObject<T>::value>
+@@ -86,7 +97,8 @@ struct IsContiguousIteratorImpl<T, true>
+                        IsArrayIter<T>,
+                        IsVectorIter<T>,
+                        IsValueArrayIter<T>,
+-                       IsCheckedContiguousIter<T>> {};
++                       IsCheckedContiguousIter<T>,
++                       IsMsvcStlContiguousIter<T>> {};
+ 
+ }  // namespace internal
+ 
+diff --git a/base/containers/id_map.h b/base/containers/id_map.h
+index 8b1b87bf22..f71afd5fbb 100644
+--- a/base/containers/id_map.h
++++ b/base/containers/id_map.h
+@@ -178,8 +178,8 @@ class IDMap final {
+     }
+ 
+     const Iterator& operator=(const Iterator& iter) {
+-      map_ = iter.map;
+-      iter_ = iter.iter;
++      map_ = iter.map_;  // Rhénium : iter.map et iter.iter n'existent pas
++      iter_ = iter.iter_;
+       Init();
+       return *this;
+     }
 diff --git a/base/debug/invalid_access_win.cc b/base/debug/invalid_access_win.cc
-index dc0d54bb..448016d2 100644
+index dc0d54bbc6..448016d268 100644
 --- a/base/debug/invalid_access_win.cc
 +++ b/base/debug/invalid_access_win.cc
 @@ -23,15 +23,24 @@ static constexpr int kNopInstructionSize = 1;
@@ -248,7 +296,7 @@ index dc0d54bb..448016d2 100644
  
  using FuncType = decltype(&nop_sled);
 diff --git a/base/debug/stack_trace_win.cc b/base/debug/stack_trace_win.cc
-index e7328d69..bced019f 100644
+index e7328d69b5..bced019fe1 100644
 --- a/base/debug/stack_trace_win.cc
 +++ b/base/debug/stack_trace_win.cc
 @@ -366,6 +366,12 @@ void StackTrace::InitTrace(const CONTEXT* context_record) {
@@ -265,7 +313,7 @@ index e7328d69..bced019f 100644
  #error Unsupported Windows Arch
  #endif
 diff --git a/base/files/file_util_win.cc b/base/files/file_util_win.cc
-index d7b5fb20..60f0083f 100644
+index d7b5fb20ae..60f0083fcf 100644
 --- a/base/files/file_util_win.cc
 +++ b/base/files/file_util_win.cc
 @@ -34,6 +34,7 @@
@@ -331,7 +379,7 @@ index d7b5fb20..60f0083f 100644
                                prefix.empty() ? kDefaultTempDirPrefix : prefix,
                                new_temp_path)) {
 diff --git a/base/functional/bind_internal.h b/base/functional/bind_internal.h
-index 3b3c5918..dfef5823 100644
+index 3b3c591874..dfef58234b 100644
 --- a/base/functional/bind_internal.h
 +++ b/base/functional/bind_internal.h
 @@ -637,7 +637,9 @@ struct FunctorTraits<R (*)(Args...)> {
@@ -355,7 +403,7 @@ index 3b3c5918..dfef5823 100644
  // For __stdcall methods.
  template <typename R, typename Receiver, typename... Args>
 diff --git a/base/immediate_crash.h b/base/immediate_crash.h
-index 049c9eef..18d1b79b 100644
+index 049c9eef22..18d1b79b78 100644
 --- a/base/immediate_crash.h
 +++ b/base/immediate_crash.h
 @@ -109,6 +109,12 @@
@@ -373,7 +421,7 @@ index 049c9eef..18d1b79b 100644
  #define TRAP_SEQUENCE1_() asm volatile("int3")
 diff --git a/base/message_loop/message_pump_uwp.cc b/base/message_loop/message_pump_uwp.cc
 new file mode 100644
-index 00000000..9486b1e5
+index 0000000000..9486b1e50b
 --- /dev/null
 +++ b/base/message_loop/message_pump_uwp.cc
 @@ -0,0 +1,296 @@
@@ -675,7 +723,7 @@ index 00000000..9486b1e5
 +}  // namespace base
 diff --git a/base/message_loop/message_pump_uwp.h b/base/message_loop/message_pump_uwp.h
 new file mode 100644
-index 00000000..bc2a11be
+index 0000000000..bc2a11be99
 --- /dev/null
 +++ b/base/message_loop/message_pump_uwp.h
 @@ -0,0 +1,97 @@
@@ -777,7 +825,7 @@ index 00000000..bc2a11be
 +
 +#endif  // BASE_MESSAGE_LOOP_MESSAGE_PUMP_UWP_H_
 diff --git a/base/message_loop/message_pump_win.cc b/base/message_loop/message_pump_win.cc
-index e6d84c4b..103e276b 100644
+index e6d84c4bbd..103e276b56 100644
 --- a/base/message_loop/message_pump_win.cc
 +++ b/base/message_loop/message_pump_win.cc
 @@ -84,6 +84,7 @@ void MessagePumpWin::Quit() {
@@ -797,7 +845,7 @@ index e6d84c4b..103e276b 100644
  //-----------------------------------------------------------------------------
  // MessagePumpForIO public:
 diff --git a/base/message_loop/message_pump_win.h b/base/message_loop/message_pump_win.h
-index 68afdb23..6c719628 100644
+index 68afdb2363..6c7196284f 100644
 --- a/base/message_loop/message_pump_win.h
 +++ b/base/message_loop/message_pump_win.h
 @@ -19,7 +19,9 @@
@@ -838,7 +886,7 @@ index 68afdb23..6c719628 100644
 +
  #endif  // BASE_MESSAGE_LOOP_MESSAGE_PUMP_WIN_H_
 diff --git a/base/power_monitor/power_monitor_device_source_win.cc b/base/power_monitor/power_monitor_device_source_win.cc
-index 4e7b6563..c102bc94 100644
+index 4e7b6563bc..c102bc941f 100644
 --- a/base/power_monitor/power_monitor_device_source_win.cc
 +++ b/base/power_monitor/power_monitor_device_source_win.cc
 @@ -100,6 +100,10 @@ PowerMonitorDeviceSource::PowerMessageWindow::PowerMessageWindow() {
@@ -892,7 +940,7 @@ index 4e7b6563..c102bc94 100644
  }  // namespace base
 diff --git a/base/process/launch_uwp.cc b/base/process/launch_uwp.cc
 new file mode 100644
-index 00000000..658ec292
+index 0000000000..658ec2924f
 --- /dev/null
 +++ b/base/process/launch_uwp.cc
 @@ -0,0 +1,53 @@
@@ -950,7 +998,7 @@ index 00000000..658ec292
 +
 +}  // namespace base
 diff --git a/base/process/process_metrics_win.cc b/base/process/process_metrics_win.cc
-index 35fe6f67..429fb8a5 100644
+index 35fe6f67d2..429fb8a53c 100644
 --- a/base/process/process_metrics_win.cc
 +++ b/base/process/process_metrics_win.cc
 @@ -161,11 +161,12 @@ TimeDelta ProcessMetrics::GetCumulativeCPUUsage() {
@@ -978,7 +1026,7 @@ index 35fe6f67..429fb8a5 100644
  
  bool ProcessMetrics::GetIOCounters(IoCounters* io_counters) const {
 diff --git a/base/profiler/register_context.h b/base/profiler/register_context.h
-index 34a2ed48..632b7415 100644
+index 34a2ed48c2..632b74155a 100644
 --- a/base/profiler/register_context.h
 +++ b/base/profiler/register_context.h
 @@ -44,6 +44,8 @@ inline uintptr_t& RegisterContextStackPointer(::CONTEXT* context) {
@@ -1009,7 +1057,7 @@ index 34a2ed48..632b7415 100644
    return AsUintPtr(&context->Eip);
  #endif
 diff --git a/base/profiler/win32_stack_frame_unwinder.h b/base/profiler/win32_stack_frame_unwinder.h
-index 75e09f1e..b98a3f7d 100644
+index 75e09f1eda..b98a3f7d2a 100644
 --- a/base/profiler/win32_stack_frame_unwinder.h
 +++ b/base/profiler/win32_stack_frame_unwinder.h
 @@ -30,7 +30,7 @@ inline ULONG64 ContextPC(CONTEXT* context) {
@@ -1021,8 +1069,47 @@ index 75e09f1e..b98a3f7d 100644
    return context->Pc;
  #else
  #error Unsupported Windows Arch
+diff --git a/base/ranges/ranges.h b/base/ranges/ranges.h
+index 641bbaf2c7..456d5d60b8 100644
+--- a/base/ranges/ranges.h
++++ b/base/ranges/ranges.h
+@@ -22,6 +22,10 @@ constexpr T* begin(T (&array)[N], priority_tag<2>) {
+   return array;
+ }
+ 
++// Rhénium : avec la STL MSVC, std::array::begin/end sont constexpr (C++17) et
++// renvoient des itérateurs de classe, que flat_tree et fixed_flat_map attendent :
++// ces surcharges, qui renvoient des pointeurs, sont réservées aux autres STL.
++#if !defined(_MSVC_STL_VERSION)
+ // Overload for mutable std::array. Required since std::array::begin is not
+ // constexpr prior to C++17. Needs to dispatch to the const overload since only
+ // const operator[] is constexpr in C++14.
+@@ -36,6 +40,7 @@ template <typename T, size_t N>
+ constexpr const T* begin(const std::array<T, N>& array, priority_tag<2>) {
+   return N != 0 ? &array[0] : nullptr;
+ }
++#endif  // !defined(_MSVC_STL_VERSION)
+ 
+ // Generic container overload.
+ template <typename Range>
+@@ -57,6 +62,7 @@ constexpr T* end(T (&array)[N], priority_tag<2>) {
+   return array + N;
+ }
+ 
++#if !defined(_MSVC_STL_VERSION)
+ // Overload for mutable std::array. Required since std::array::end is not
+ // constexpr prior to C++17. Needs to dispatch to the const overload since only
+ // const operator[] is constexpr in C++14.
+@@ -71,6 +77,7 @@ template <typename T, size_t N>
+ constexpr const T* end(const std::array<T, N>& array, priority_tag<2>) {
+   return N != 0 ? (&array[0]) + N : nullptr;
+ }
++#endif  // !defined(_MSVC_STL_VERSION)
+ 
+ // Generic container overload.
+ template <typename Range>
 diff --git a/base/run_loop.h b/base/run_loop.h
-index 3da3cc78..f9a40596 100644
+index 3da3cc7816..f9a40596ba 100644
 --- a/base/run_loop.h
 +++ b/base/run_loop.h
 @@ -274,9 +274,9 @@ class BASE_EXPORT RunLoop {
@@ -1038,7 +1125,7 @@ index 3da3cc78..f9a40596 100644
  #endif
  
 diff --git a/base/task/sequence_manager/sequence_manager_impl.cc b/base/task/sequence_manager/sequence_manager_impl.cc
-index 1306b204..8422532d 100644
+index 1306b2047c..8422532d55 100644
 --- a/base/task/sequence_manager/sequence_manager_impl.cc
 +++ b/base/task/sequence_manager/sequence_manager_impl.cc
 @@ -345,7 +345,8 @@ void SequenceManagerImpl::BindToMessagePump(std::unique_ptr<MessagePump> pump) {
@@ -1052,7 +1139,7 @@ index 1306b204..8422532d 100644
      controller_->AttachToMessagePump();
    }
 diff --git a/base/task/sequence_manager/thread_controller.h b/base/task/sequence_manager/thread_controller.h
-index d7cb0654..81dce44f 100644
+index d7cb0654ba..81dce44f4b 100644
 --- a/base/task/sequence_manager/thread_controller.h
 +++ b/base/task/sequence_manager/thread_controller.h
 @@ -132,7 +132,7 @@ class BASE_EXPORT ThreadController {
@@ -1065,7 +1152,7 @@ index d7cb0654..81dce44f 100644
    // AttachToMessagePump(), which connects this ThreadController to the
    // UI thread's CFRunLoop and allows PostTask() to work.
 diff --git a/base/task/sequence_manager/thread_controller_impl.cc b/base/task/sequence_manager/thread_controller_impl.cc
-index 424a7af5..0f4d2b0b 100644
+index 424a7af544..0f4d2b0b65 100644
 --- a/base/task/sequence_manager/thread_controller_impl.cc
 +++ b/base/task/sequence_manager/thread_controller_impl.cc
 @@ -363,7 +363,7 @@ MessagePump* ThreadControllerImpl::GetBoundMessagePump() const {
@@ -1078,7 +1165,7 @@ index 424a7af5..0f4d2b0b 100644
    NOTREACHED();
  }
 diff --git a/base/task/sequence_manager/thread_controller_impl.h b/base/task/sequence_manager/thread_controller_impl.h
-index f49f71b1..9a0212bd 100644
+index f49f71b147..9a0212bdea 100644
 --- a/base/task/sequence_manager/thread_controller_impl.h
 +++ b/base/task/sequence_manager/thread_controller_impl.h
 @@ -61,7 +61,7 @@ class BASE_EXPORT ThreadControllerImpl : public ThreadController,
@@ -1091,7 +1178,7 @@ index f49f71b1..9a0212bd 100644
  #endif
  #if BUILDFLAG(IS_IOS)
 diff --git a/base/task/sequence_manager/thread_controller_with_message_pump_impl.cc b/base/task/sequence_manager/thread_controller_with_message_pump_impl.cc
-index 7e027675..442cb99a 100644
+index 7e027675a9..442cb99aba 100644
 --- a/base/task/sequence_manager/thread_controller_with_message_pump_impl.cc
 +++ b/base/task/sequence_manager/thread_controller_with_message_pump_impl.cc
 @@ -29,6 +29,8 @@
@@ -1116,7 +1203,7 @@ index 7e027675..442cb99a 100644
  
  bool ThreadControllerWithMessagePumpImpl::ShouldQuitRunLoopWhenIdle() {
 diff --git a/base/task/sequence_manager/thread_controller_with_message_pump_impl.h b/base/task/sequence_manager/thread_controller_with_message_pump_impl.h
-index 5f5b42fb..212223ed 100644
+index 5f5b42fbb4..212223ed5c 100644
 --- a/base/task/sequence_manager/thread_controller_with_message_pump_impl.h
 +++ b/base/task/sequence_manager/thread_controller_with_message_pump_impl.h
 @@ -74,7 +74,7 @@ class BASE_EXPORT ThreadControllerWithMessagePumpImpl
@@ -1129,7 +1216,7 @@ index 5f5b42fb..212223ed 100644
  #endif
  #if BUILDFLAG(IS_IOS)
 diff --git a/base/task/single_thread_task_executor_unittest.cc b/base/task/single_thread_task_executor_unittest.cc
-index 34840cb3..9b15208e 100644
+index 34840cb34c..9b15208e28 100644
 --- a/base/task/single_thread_task_executor_unittest.cc
 +++ b/base/task/single_thread_task_executor_unittest.cc
 @@ -47,7 +47,8 @@
@@ -1193,7 +1280,7 @@ index 34840cb3..9b15208e 100644
  
  void PostMultipleTasks() {
 diff --git a/base/task/thread_pool/pooled_single_thread_task_runner_manager.cc b/base/task/thread_pool/pooled_single_thread_task_runner_manager.cc
-index a43703f1..892ea48d 100644
+index a43703f17b..892ea48d81 100644
 --- a/base/task/thread_pool/pooled_single_thread_task_runner_manager.cc
 +++ b/base/task/thread_pool/pooled_single_thread_task_runner_manager.cc
 @@ -355,12 +355,20 @@ class WorkerThreadCOMDelegate : public WorkerThreadDelegate {
@@ -1226,7 +1313,7 @@ index a43703f1..892ea48d 100644
  
    bool get_work_first_ = true;
 diff --git a/base/threading/platform_thread_win.cc b/base/threading/platform_thread_win.cc
-index eb98c658..0e024532 100644
+index eb98c658be..0e0245327b 100644
 --- a/base/threading/platform_thread_win.cc
 +++ b/base/threading/platform_thread_win.cc
 @@ -226,6 +226,18 @@ bool CreateThreadInternal(size_t stack_size,
@@ -1274,7 +1361,7 @@ index eb98c658..0e024532 100644
    bool desire_ecoqos = false;
    switch (thread_type) {
 diff --git a/base/threading/thread_local_storage_win.cc b/base/threading/thread_local_storage_win.cc
-index f88f27f9..e7e78489 100644
+index f88f27f97c..e7e7848909 100644
 --- a/base/threading/thread_local_storage_win.cc
 +++ b/base/threading/thread_local_storage_win.cc
 @@ -46,7 +46,8 @@ void PlatformThreadLocalStorage::SetTLSValue(TLSKey key, void* value) {
@@ -1288,7 +1375,7 @@ index f88f27f9..e7e78489 100644
  #pragma comment(linker, "/INCLUDE:_tls_used")
  #pragma comment(linker, "/INCLUDE:p_thread_callback_base")
 diff --git a/base/time/time_win.cc b/base/time/time_win.cc
-index c6540592..3c500ff8 100644
+index c6540592a5..3c500ff8ef 100644
 --- a/base/time/time_win.cc
 +++ b/base/time/time_win.cc
 @@ -667,7 +667,8 @@ ThreadTicks ThreadTicks::GetForThread(
@@ -1337,7 +1424,7 @@ index c6540592..3c500ff8 100644
  
  }  // namespace base
 diff --git a/base/values_unittest.cc b/base/values_unittest.cc
-index c2370099..045799de 100644
+index c23700998f..045799de14 100644
 --- a/base/values_unittest.cc
 +++ b/base/values_unittest.cc
 @@ -40,7 +40,11 @@ namespace base {
@@ -1354,7 +1441,7 @@ index c2370099..045799de 100644
    // https://github.com/llvm/llvm-project/issues/49358). `base::Value::Dict` has
    // a `base::flat_tree` which relies on this attribute to avoid wasting space
 diff --git a/base/win/dllmain.cc b/base/win/dllmain.cc
-index 0c5546fb..2b62bbc0 100644
+index 0c5546fb1b..2b62bbc01f 100644
 --- a/base/win/dllmain.cc
 +++ b/base/win/dllmain.cc
 @@ -42,7 +42,8 @@ static bool linker_notifications_are_active = false;
@@ -1368,7 +1455,7 @@ index 0c5546fb..2b62bbc0 100644
  #pragma comment(linker, "/INCLUDE:_tls_used")
  #pragma comment(linker, "/INCLUDE:p_thread_callback_dllmain_typical_entry")
 diff --git a/base/win/registry.cc b/base/win/registry.cc
-index 4b3c3d75..1ea98d83 100644
+index 4b3c3d75a2..1ea98d8338 100644
 --- a/base/win/registry.cc
 +++ b/base/win/registry.cc
 @@ -16,8 +16,10 @@
@@ -1521,21 +1608,23 @@ index 4b3c3d75..1ea98d83 100644
      key_ = nullptr;
    } else {
 diff --git a/base/win/windows_version.cc b/base/win/windows_version.cc
-index 04bd7ae0..5c485cf0 100644
+index 04bd7ae042..a625bb64ea 100644
 --- a/base/win/windows_version.cc
 +++ b/base/win/windows_version.cc
-@@ -26,7 +26,8 @@
+@@ -26,9 +26,8 @@
  #error VS 2017 Update 3.2 or higher is required
  #endif
  
 -#if !defined(NTDDI_WIN10_NI)
-+// Rhénium : WINUWP ARM32 impose le SDK 10.0.19041, le dernier avec les bibliothèques ARM32.
-+#if !defined(NTDDI_WIN10_NI) && !defined(WINUWP)
- #error Windows 10.0.22621.0 SDK or higher required.
- #endif
+-#error Windows 10.0.22621.0 SDK or higher required.
+-#endif
++// Rhénium : tout le build (ARM32 et outils hôtes) utilise le SDK 10.0.19041, le
++// dernier avec les bibliothèques ARM32 ; pas de contrôle de version du SDK.
  
+ namespace base {
+ namespace win {
 diff --git a/base/win/windows_version_unittest.cc b/base/win/windows_version_unittest.cc
-index 0ef9e75e..b981697a 100644
+index 0ef9e75ea2..b981697a3e 100644
 --- a/base/win/windows_version_unittest.cc
 +++ b/base/win/windows_version_unittest.cc
 @@ -120,6 +120,9 @@ TEST(OSInfo, GetWowStatusForProcess) {

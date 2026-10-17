@@ -1,0 +1,13 @@
+
+# J2 (..\j2\gn\BUILD.gn, ajouté par build-content.ps1) : les bibliothèques de
+# content_shell en single-process. L'exe Win32 content_shell (Crashpad, .rc)
+# n'a pas cours sous UWP : l'app Rhénium les liera elle-même.
+group("rhenium_content") {
+  testonly = true
+  deps = [
+    "//content/shell:content_shell_app",
+    "//content/shell:content_shell_lib",
+    "//content/shell:pak",
+    "//tools/v8_context_snapshot:v8_context_snapshot",
+  ]
+}

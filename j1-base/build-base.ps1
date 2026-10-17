@@ -6,11 +6,17 @@
   ./build-base.ps1 -GenOnly   # correctifs, racine GN, args.gn, gn gen
   ./build-base.ps1            # + ninja : obj\rhenium_base.lib (//base, dépendances, test de fumée)
                               #   et obj\rhenium_base_tests.lib + rhenium_base_unittests.lib (sous-ensemble de base_unittests)
+  Utilisé aussi par ..\j2\build-content.ps1 (-ExtraArgs, -Targets, -PatchDirs, -ExtraRootGn).
 #>
 param(
   [string] $Src = "$PSScriptRoot\..\chromium\src",
   [string] $OutDir = 'out\uwp-arm',
   [string] $LlvmDir = "$env:ProgramFiles\LLVM",
+  [string[]] $ExtraArgs = @(),  # lignes args.gn en plus
+  [string[]] $Targets = @('rhenium_base', 'rhenium_base_tests', 'rhenium_base_unittests'),
+  [string[]] $PatchDirs = @(),  # dossiers de correctifs appliqués après ceux de J1
+  [string] $ExtraRootGn,       # ajouté à la racine GN (gn\BUILD.gn)
+  [switch] $KeepGoing,         # ninja -k 0 : compiler tout ce qui peut l'être
   [switch] $GenOnly
 )
 
@@ -19,19 +25,25 @@ $Src = (Resolve-Path $Src).Path
 $root = Split-Path (Split-Path $Src)
 
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-$msvc = & $vswhere -all -prerelease -products * -property installationPath |
+$toolsets = & $vswhere -all -prerelease -products * -property installationPath |
   ForEach-Object { Get-ChildItem "$_\VC\Tools\MSVC" -Directory -ErrorAction SilentlyContinue } |
-  Where-Object { Test-Path "$($_.FullName)\lib\arm\libcmt.lib" } | Sort-Object { [version]$_.Name } | Select-Object -Last 1
+  Sort-Object { [version]$_.Name }
+$msvc = $toolsets | Where-Object { Test-Path "$($_.FullName)\lib\arm\libcmt.lib" } | Select-Object -Last 1
 if (-not $msvc) { throw 'Aucun toolset MSVC avec les bibliothèques ARM32 (14.44).' }
 $vsPath = $msvc.FullName -replace '\\VC\\Tools\\MSVC\\.*$', ''
 $env:RHENIUM_MSVC_DIR = $msvc.FullName
+# ATL ARM32 peut venir d'un autre toolset (14.30 ici) : compatibilité binaire de MSVC 14.x.
+$atl = $toolsets | Where-Object { Test-Path "$($_.FullName)\atlmfc\lib\arm\atls.lib" } | Select-Object -Last 1
+if ($atl) { $env:RHENIUM_ATL_DIR = "$($atl.FullName)\atlmfc" }
 $env:RHENIUM_WINSDK_VERSION = '10.0.19041.0'
 $env:RHENIUM_WINSDK_DIR = "${env:ProgramFiles(x86)}\Windows Kits\10"
 $env:DEPOT_TOOLS_WIN_TOOLCHAIN = '0'
 $python = (Get-Command python -ErrorAction Stop).Source
 $clangVersion = (& "$LlvmDir\bin\clang-cl.exe" --version | Select-Object -First 1) -replace '^clang version (\d+).*$', '$1'
 
-foreach ($patch in Get-ChildItem "$PSScriptRoot\patches\*.patch" -ErrorAction SilentlyContinue | Sort-Object Name) {
+$patches = @(Get-ChildItem "$PSScriptRoot\patches\*.patch" -ErrorAction SilentlyContinue | Sort-Object Name) +
+  @($PatchDirs | ForEach-Object { Get-ChildItem "$_\*.patch" -ErrorAction SilentlyContinue | Sort-Object Name })
+foreach ($patch in $patches) {
   git -C $Src apply --check --reverse $patch.FullName 2>$null
   if ($LASTEXITCODE -eq 0) { continue }
   git -C $Src apply --whitespace=nowarn $patch.FullName
@@ -40,7 +52,9 @@ foreach ($patch in Get-ChildItem "$PSScriptRoot\patches\*.patch" -ErrorAction Si
 }
 
 Copy-Item "$PSScriptRoot\gn\dot.gn" "$Src\.gn" -Force
-Copy-Item "$PSScriptRoot\gn\BUILD.gn" "$Src\BUILD.gn" -Force
+$rootGn = Get-Content "$PSScriptRoot\gn\BUILD.gn" -Raw
+if ($ExtraRootGn) { $rootGn += "`n" + (Get-Content $ExtraRootGn -Raw) }
+Set-Content "$Src\BUILD.gn" $rootGn -NoNewline -Encoding utf8
 New-Item -ItemType Directory -Force "$Src\rhenium" | Out-Null
 Copy-Item "$PSScriptRoot\gn\base_smoke.cc", "$PSScriptRoot\gn\base_tests.cc" "$Src\rhenium\" -Force
 
@@ -78,6 +92,7 @@ use_allocator_shim = false
 enable_backup_ref_ptr_support = false
 enable_rust = false
 "@
+if ($ExtraArgs) { $argsGn += "`n" + ($ExtraArgs -join "`n") }
 $out = Join-Path $Src $OutDir
 New-Item -ItemType Directory -Force $out | Out-Null
 Set-Content "$out\args.gn" $argsGn -Encoding ascii
@@ -92,6 +107,7 @@ try {
   }
   Write-Host "$($output | Select-Object -Last 1)"
   if ($GenOnly) { return }
-  cmd /c "`"$root\v8\third_party\ninja\ninja.exe`" -C $OutDir rhenium_base rhenium_base_tests rhenium_base_unittests < NUL"
+  $keep = if ($KeepGoing) { '-k 0' } else { '' }
+  cmd /c "`"$root\v8\third_party\ninja\ninja.exe`" -C $OutDir $keep $($Targets -join ' ') < NUL"
   if ($LASTEXITCODE -ne 0) { throw "ninja a échoué (code $LASTEXITCODE)" }
 } finally { Pop-Location }

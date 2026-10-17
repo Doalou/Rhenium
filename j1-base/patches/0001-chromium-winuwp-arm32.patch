@@ -1,5 +1,5 @@
 diff --git a/build/config/BUILDCONFIG.gn b/build/config/BUILDCONFIG.gn
-index 6ee83a41..1c7b050d 100644
+index 6ee83a41a0..1c7b050dcc 100644
 --- a/build/config/BUILDCONFIG.gn
 +++ b/build/config/BUILDCONFIG.gn
 @@ -263,7 +263,12 @@ if (target_os == "android") {
@@ -16,8 +16,24 @@ index 6ee83a41..1c7b050d 100644
  } else if (target_os == "aix") {
    _default_toolchain = "//build/toolchain/aix:$target_cpu"
  } else if (target_os == "zos") {
+diff --git a/build/config/compiler/BUILD.gn b/build/config/compiler/BUILD.gn
+index ae742b0b85..2b8d81101e 100644
+--- a/build/config/compiler/BUILD.gn
++++ b/build/config/compiler/BUILD.gn
+@@ -1769,6 +1769,11 @@ config("default_warnings") {
+ 
+           # TODO(crbug.com/1412713) Evaluate and possibly enable.
+           "-Wno-deprecated-this-capture",
++
++          # Rhénium : clang 23, bien plus récent que celui de M116, en fait des
++          # erreurs par défaut.
++          "-Wno-c++11-narrowing-const-reference",
++          "-Wno-missing-template-arg-list-after-template-kw",
+         ]
+ 
+         if (llvm_force_head_revision) {
 diff --git a/build/config/rust.gni b/build/config/rust.gni
-index ee3f94c7..f669a9d1 100644
+index ee3f94c70f..f669a9d10b 100644
 --- a/build/config/rust.gni
 +++ b/build/config/rust.gni
 @@ -254,6 +254,9 @@ if (is_linux || is_chromeos) {
@@ -31,7 +47,7 @@ index ee3f94c7..f669a9d1 100644
      assert(false, "Architecture not supported")
    }
 diff --git a/build/config/win/BUILD.gn b/build/config/win/BUILD.gn
-index f7a5f9ce..56948247 100644
+index f7a5f9ce97..061adc7136 100644
 --- a/build/config/win/BUILD.gn
 +++ b/build/config/win/BUILD.gn
 @@ -95,7 +95,8 @@ config("compiler") {
@@ -94,16 +110,15 @@ index f7a5f9ce..56948247 100644
        defines += [ "WIN10=_WIN32_WINNT_WIN10" ]
      } else if (target_winuwp_version == "8.1") {
        defines += [ "WIN8_1=_WIN32_WINNT_WINBLUE" ]
-@@ -289,8 +308,18 @@ config("runtime_library") {
+@@ -289,8 +308,21 @@ config("runtime_library") {
  # Windows is available at runtime. Targets using these libraries need to
  # manually override this config for their compiles.
  config("winver") {
 +  # Rhénium : le SDK 10.0.19041 (dernier avec ARM32) ne connaît pas NTDDI_WIN10_NI ;
-+  # sur ARM32 on vise l'API de Windows 10 Mobile 1703 (15063, RS2) pour que les
-+  # fonctions absentes du téléphone soient refusées dès la compilation.
-+  if (current_cpu == "arm") {
-+    _ntddi = "NTDDI_WIN10_RS2"
-+  } else if (windows_sdk_version == "10.0.19041.0") {
++  # on vise la version du SDK, ARM32 compris : Chromium suppose ses déclarations
++  # (CDM Media Foundation…). Les fonctions absentes du téléphone sont repérées par
++  # la vérification des imports sur le Lumia (sonde -ImportCheck).
++  if (windows_sdk_version == "10.0.19041.0") {
 +    _ntddi = "NTDDI_WIN10_VB"
 +  } else {
 +    _ntddi = "NTDDI_WIN10_NI"
@@ -111,10 +126,14 @@ index f7a5f9ce..56948247 100644
    defines = [
 -    "NTDDI_VERSION=NTDDI_WIN10_NI",
 +    "NTDDI_VERSION=$_ntddi",
++
++    # Rhénium : absents du SDK 10.0.19041, utilisés par gpu/config.
++    "D3D_FEATURE_LEVEL_12_2=static_cast<D3D_FEATURE_LEVEL>(0xc200)",
++    "D3D_SHADER_MODEL_6_7=static_cast<D3D_SHADER_MODEL>(0x67)",
  
      # We can't say `=_WIN32_WINNT_WIN10` here because some files do
      # `#if WINVER < 0x0600` without including windows.h before,
-@@ -466,7 +495,8 @@ config("default_crt") {
+@@ -466,7 +498,8 @@ config("default_crt") {
      # exceptions on.
      configs = [ ":dynamic_crt" ]
    } else {
@@ -124,7 +143,7 @@ index f7a5f9ce..56948247 100644
        # https://blogs.msdn.microsoft.com/vcblog/2014/06/10/the-great-c-runtime-crt-refactoring/
        # contains a details explanation of what is happening with the Windows
        # CRT in Visual Studio releases related to Windows store applications.
-@@ -597,7 +627,7 @@ if (current_cpu == "x64") {
+@@ -597,7 +630,7 @@ if (current_cpu == "x64") {
    # The number after the comma is the minimum required OS version.
    # 5.02 = Windows Server 2003.
    subsystem_version_suffix = ",5.02"
@@ -134,7 +153,7 @@ index f7a5f9ce..56948247 100644
    subsystem_version_suffix = ",10.0"
  } else {
 diff --git a/build/config/win/visual_studio_version.gni b/build/config/win/visual_studio_version.gni
-index 1da479dd..a910d206 100644
+index 1da479dd5e..a910d206bd 100644
 --- a/build/config/win/visual_studio_version.gni
 +++ b/build/config/win/visual_studio_version.gni
 @@ -40,5 +40,6 @@ if (visual_studio_path == "") {
@@ -147,10 +166,10 @@ index 1da479dd..a910d206 100644
  }
 diff --git a/build/rhenium/msvc_arm32_intrinsics.h b/build/rhenium/msvc_arm32_intrinsics.h
 new file mode 100644
-index 00000000..95dab130
+index 0000000000..186c727c21
 --- /dev/null
 +++ b/build/rhenium/msvc_arm32_intrinsics.h
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,27 @@
 +// Rhénium : intrinsèques MSVC ARM qu'appelle la STL MSVC (std::countl_zero) et que clang ne
 +// déclare que pour ARM64. Inclus de force (/FI) sur Windows ARM32.
 +
@@ -169,11 +188,17 @@ index 00000000..95dab130
 +  return value ? (unsigned int)__builtin_clzll(value) : 64u;
 +}
 +
++// Barrière de compilation de MSVC, déclarée mais pas fournie par clang pour ARM32
++// (SQLite s'en sert avec clang-cl).
++static __inline__ void __attribute__((__always_inline__)) _ReadWriteBarrier(void) {
++  __asm__ __volatile__("" ::: "memory");
++}
++
 +#endif
 +
 +#endif  // BUILD_RHENIUM_MSVC_ARM32_INTRINSICS_H_
 diff --git a/build/toolchain/win/BUILD.gn b/build/toolchain/win/BUILD.gn
-index fe097903..c7088a09 100644
+index fe0979038d..c7088a0999 100644
 --- a/build/toolchain/win/BUILD.gn
 +++ b/build/toolchain/win/BUILD.gn
 @@ -15,7 +15,8 @@ assert(is_win, "Should only be running on Windows")
@@ -225,11 +250,122 @@ index fe097903..c7088a09 100644
    assert(target_cpu == "x64" || target_cpu == "x86" || target_cpu == "arm" ||
           target_cpu == "arm64")
  
+diff --git a/build/toolchain/win/midl.gni b/build/toolchain/win/midl.gni
+index 1f3ea409da..a65377ca6b 100644
+--- a/build/toolchain/win/midl.gni
++++ b/build/toolchain/win/midl.gni
+@@ -4,6 +4,7 @@
+ 
+ assert(is_win)
+ 
++import("//build/config/clang/clang.gni")
+ import("//build/config/win/visual_studio_version.gni")
+ 
+ # This template defines a rule to invoke the MS IDL compiler. The generated
+@@ -155,6 +156,10 @@ template("midl") {
+     } else if (current_cpu == "arm64") {
+       win_tool_arch = "environment.arm64"
+       idl_target_platform = "arm64"
++    } else if (current_cpu == "arm") {
++      # Rhénium : Windows ARM32 ; pas de sorties de référence, midl.exe fait foi.
++      win_tool_arch = "environment.arm"
++      idl_target_platform = "arm32"
+     } else {
+       assert(false, "Need environment for this arch")
+     }
+@@ -169,8 +174,8 @@ template("midl") {
+       dlldata_file,
+       interface_identifier_file,
+       proxy_file,
+-      rebase_path("//third_party/llvm-build/Release+Asserts/bin/clang-cl.exe",
+-                  root_build_dir),
++      # Rhénium : le clang-cl de la toolchain (celui de Google n'est pas là).
++      rebase_path("$clang_base_path/bin/clang-cl.exe", root_build_dir),
+       "{{source}}",
+       "/char",
+       "signed",
+diff --git a/build/toolchain/win/midl.py b/build/toolchain/win/midl.py
+index 9c0d0a4ccf..87b9f66536 100644
+--- a/build/toolchain/win/midl.py
++++ b/build/toolchain/win/midl.py
+@@ -448,6 +448,13 @@ def main(arch, gendir, outdir, dynamic_guids, tlb, h, dlldata, iid, proxy,
+   _, mismatch, errors = filecmp.cmpfiles(midl_output_dir, outdir, common_files)
+   assert not errors
+ 
++  # Rhénium : pas de sorties de référence pour cette architecture (arm) : celles
++  # de midl.exe font foi.
++  if mismatch and not source_exists:
++    for f in common_files:
++      shutil.copy(os.path.join(midl_output_dir, f), outdir)
++    return 0
++
+   if mismatch:
+     print('midl.exe output different from files in %s, see %s' %
+           (outdir, midl_output_dir))
+diff --git a/build/toolchain/win/rc/rc.py b/build/toolchain/win/rc/rc.py
+index a650506a1e..00d04adee4 100644
+--- a/build/toolchain/win/rc/rc.py
++++ b/build/toolchain/win/rc/rc.py
+@@ -125,6 +125,11 @@ def Preprocess(rc_file_data, flags):
+   """Runs the input file through the preprocessor."""
+   clang = os.path.join(SRC_DIR, 'third_party', 'llvm-build',
+                        'Release+Asserts', 'bin', 'clang-cl')
++  # Rhénium : le clang-cl de la toolchain (jonction toolchains\llvm du projet).
++  rhenium_clang = os.path.join(SRC_DIR, '..', '..', 'toolchains', 'llvm', 'bin',
++                               'clang-cl')
++  if os.path.exists(rhenium_clang + '.exe'):
++    clang = rhenium_clang
+   # Let preprocessor write to a temp file so that it doesn't interfere
+   # with /showIncludes output on stdout.
+   if sys.platform == 'win32':
+@@ -204,7 +209,7 @@ def RunRc(preprocessed_output, is_utf8, flags):
+   return p.returncode
+ 
+ 
+-def CompareToMsRcOutput(preprocessed_output, is_utf8, flags):
++def CompareToMsRcOutput(preprocessed_output, is_utf8, flags, ms_rc_only=False):
+   msrc_in = flags.output + '.preprocessed.rc'
+ 
+   # Strip preprocessor line markers.
+@@ -214,7 +219,7 @@ def CompareToMsRcOutput(preprocessed_output, is_utf8, flags):
+   with open(msrc_in, 'wb') as f:
+     f.write(preprocessed_output)
+ 
+-  msrc_out = flags.output + '_ms_rc'
++  msrc_out = flags.output if ms_rc_only else flags.output + '_ms_rc'
+   msrc_cmd = ['rc', '/nologo', '/x', '/fo' + msrc_out]
+ 
+   # Make sure rc-relative resources can be found. rc.exe looks for external
+@@ -242,7 +247,7 @@ def CompareToMsRcOutput(preprocessed_output, is_utf8, flags):
+ 
+   rc_exe_exit_code = subprocess.call(msrc_cmd)
+   # Assert Microsoft rc.exe and rc.py produced identical .res files.
+-  if rc_exe_exit_code == 0:
++  if rc_exe_exit_code == 0 and not ms_rc_only:
+     import filecmp
+     assert filecmp.cmp(msrc_out, flags.output)
+   return rc_exe_exit_code
+@@ -258,6 +263,15 @@ def main():
+   flags = ParseFlags()
+   rc_file_data, is_utf8 = ReadInput(flags.input)
+   preprocessed_output = Preprocess(rc_file_data, flags)
++
++  # Rhénium : sans le rc.exe de Chromium (téléchargé par un hook de gclient),
++  # celui du SDK fait le travail. Les dépendances viennent du /showIncludes du
++  # préprocesseur.
++  if sys.platform == 'win32' and not os.path.exists(
++      os.path.join(THIS_DIR, 'win', 'rc.exe')):
++    return CompareToMsRcOutput(preprocessed_output, is_utf8, flags,
++                               ms_rc_only=True)
++
+   rc_exe_exit_code = RunRc(preprocessed_output, is_utf8, flags)
+ 
+   # 5. On Windows, we also call Microsoft's rc.exe and check that we produced
 diff --git a/build/toolchain/win/setup_toolchain.py b/build/toolchain/win/setup_toolchain.py
-index d2f5798c..65233c10 100644
+index d2f5798ce6..97df0f8c07 100644
 --- a/build/toolchain/win/setup_toolchain.py
 +++ b/build/toolchain/win/setup_toolchain.py
-@@ -101,6 +101,39 @@ def _LoadEnvFromBat(args):
+@@ -101,6 +101,46 @@ def _LoadEnvFromBat(args):
    return variables.decode(errors='ignore')
  
  
@@ -260,6 +396,13 @@ index d2f5798c..65233c10 100644
 +                               os.path.join(kits, 'bin', ver, 'x64'),
 +                               os.environ['PATH']]),
 +  }
++  # ATL (accessibilité Windows, synthèse vocale, module ATL de content), si
++  # le composant est installé pour cette architecture (RHENIUM_ATL_DIR).
++  atl = os.environ.get('RHENIUM_ATL_DIR', os.path.join(msvc, 'atlmfc'))
++  atl_lib = os.path.join(atl, 'lib', cpu_dir)
++  if os.path.isdir(atl_lib):
++    env['INCLUDE'] += ';' + os.path.join(atl, 'include')
++    env['LIB'] += ';' + atl_lib
 +  for name in ('SYSTEMROOT', 'TEMP', 'TMP', 'PATHEXT', 'USERPROFILE'):
 +    if name in os.environ:
 +      env[name] = os.environ[name]
@@ -269,7 +412,7 @@ index d2f5798c..65233c10 100644
  def _LoadToolchainEnv(cpu, toolchain_root, sdk_dir, target_store):
    """Returns a dictionary with environment variables that must be set while
    running binaries from the toolchain (e.g. INCLUDE and PATH for cl.exe)."""
-@@ -108,6 +141,8 @@ def _LoadToolchainEnv(cpu, toolchain_root, sdk_dir, target_store):
+@@ -108,6 +148,8 @@ def _LoadToolchainEnv(cpu, toolchain_root, sdk_dir, target_store):
    # the setup script from the SDK if so. |cpu| should be either
    # 'x86' or 'x64' or 'arm' or 'arm64'.
    assert cpu in ('x86', 'x64', 'arm', 'arm64')
@@ -279,7 +422,7 @@ index d2f5798c..65233c10 100644
      # Load environment from json file.
      env = os.path.normpath(os.path.join(sdk_dir, 'bin/SetEnv.%s.json' % cpu))
 diff --git a/build/toolchain/win/toolchain.gni b/build/toolchain/win/toolchain.gni
-index 19c02227..4770df3c 100644
+index 19c0222704..4770df3ca5 100644
 --- a/build/toolchain/win/toolchain.gni
 +++ b/build/toolchain/win/toolchain.gni
 @@ -669,6 +669,9 @@ template("win_toolchains") {
@@ -305,7 +448,7 @@ index 19c02227..4770df3c 100644
      }
    }
 diff --git a/build/toolchain/win/win_toolchain_data.gni b/build/toolchain/win/win_toolchain_data.gni
-index a6e8328b..4dbf74ff 100644
+index a6e8328b23..4dbf74ff0c 100644
 --- a/build/toolchain/win/win_toolchain_data.gni
 +++ b/build/toolchain/win/win_toolchain_data.gni
 @@ -28,6 +28,20 @@ declare_args() {
@@ -329,8 +472,30 @@ index a6e8328b..4dbf74ff 100644
    if (target_cpu == "arm64" || host_cpu == "arm64") {
      win_toolchain_data_arm64 =
          exec_script("//build/toolchain/win/setup_toolchain.py",
+diff --git a/build/win/message_compiler.py b/build/win/message_compiler.py
+index 9759c1fd1a..357dfbef68 100644
+--- a/build/win/message_compiler.py
++++ b/build/win/message_compiler.py
+@@ -8,7 +8,6 @@
+ 
+ 
+ import difflib
+-import distutils.dir_util
+ import filecmp
+ import os
+ import re
+@@ -41,7 +40,8 @@ def main():
+   source = os.path.join(THIS_DIR, "..", "..",
+       "third_party", "win_build_output",
+       re.sub(r'^(?:[^/]+/)?gen/', 'mc/', header_dir))
+-  distutils.dir_util.copy_tree(source, header_dir, preserve_times=False)
++  # Rhénium : distutils n'existe plus depuis Python 3.12.
++  shutil.copytree(source, header_dir, dirs_exist_ok=True)
+ 
+   # On non-Windows, that's all we can do.
+   if sys.platform != 'win32':
 diff --git a/third_party/boringssl/BUILD.gn b/third_party/boringssl/BUILD.gn
-index 6fb13437..b2c87a44 100644
+index 6fb13437c6..b2c87a4402 100644
 --- a/third_party/boringssl/BUILD.gn
 +++ b/third_party/boringssl/BUILD.gn
 @@ -94,7 +94,8 @@ if (enable_rust_boringssl) {
@@ -344,7 +509,7 @@ index 6fb13437..b2c87a44 100644
    nasm_assemble("boringssl_asm") {
      if (current_cpu == "x64") {
 diff --git a/third_party/boringssl/src/crypto/thread_win.c b/third_party/boringssl/src/crypto/thread_win.c
-index 6daa8144..4bdc3324 100644
+index 6daa8144dc..4bdc332400 100644
 --- a/third_party/boringssl/src/crypto/thread_win.c
 +++ b/third_party/boringssl/src/crypto/thread_win.c
 @@ -125,7 +125,8 @@ static void NTAPI thread_local_destructor(PVOID module, DWORD reason,
@@ -358,7 +523,7 @@ index 6daa8144..4bdc3324 100644
  __pragma(comment(
      linker, "/INCLUDE:" EXPAND_AND_STRINGIFY(p_thread_callback_boringssl)))
 diff --git a/third_party/googletest/src/googletest/include/gtest/internal/gtest-port.h b/third_party/googletest/src/googletest/include/gtest/internal/gtest-port.h
-index e178782c..3c0eb610 100644
+index e178782ccd..3c0eb610f1 100644
 --- a/third_party/googletest/src/googletest/include/gtest/internal/gtest-port.h
 +++ b/third_party/googletest/src/googletest/include/gtest/internal/gtest-port.h
 @@ -595,10 +595,12 @@ typedef struct _RTL_CRITICAL_SECTION GTEST_CRITICAL_SECTION;
