@@ -59,10 +59,19 @@ using Microsoft::WRL::RuntimeClassFlags;
 using Microsoft::WRL::WinRt;
 using Microsoft::WRL::Wrappers::HStringReference;
 
-// Page de l'étape 3 : la console de la page est recopiée dans le journal.
+// Page de test : la console de la page est recopiée dans le journal. Étape 3,
+// JavaScript ; étape 4, requête HTTPS vers l'API de Wikipédia (lisible depuis
+// toute origine avec origin=*), puis ouverture de la page d'accueil.
 constexpr char kDefaultUrl[] =
-    "data:text/html,<title>Rhenium</title>"
-    "<script>console.log('Rhenium: JS ' + (6 * 7))</script>";
+    "data:text/html,<title>Rhenium</title><script>"
+    "console.log('Rhenium: JS ' + (6 * 7));"
+    "fetch('https://fr.wikipedia.org/w/api.php?action=query%26meta=siteinfo"
+    "%26format=json%26origin=*')"
+    ".then(r => { console.log('Rhenium: HTTP ' + r.status); return r.json(); })"
+    ".then(j => { console.log('Rhenium: site ' + j.query.general.sitename);"
+    " location.href = 'https://fr.wikipedia.org/'; })"
+    ".catch(e => console.log('Rhenium: erreur ' + e));"
+    "</script>";
 
 void BuildCommandLine() {
   base::CommandLine::Init(0, nullptr);

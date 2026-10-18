@@ -84,6 +84,11 @@ App UWP `Rhenium.Shell` : `rhenium_shell.exe` (cible GN `rhenium_shell`, 122 Mo)
 - **Fichier d'échange du rendu** : `PreventExecuteMapping` rend vrai sous `WINUWP` (un seul processus ; `GetLongPathName` ne lit pas les dossiers parents d'une app).
 - **Résultat (2026-10-18)** : `INFO:CONSOLE(1)] "Rhenium: JS 42"` dans le journal : la page se charge et son JavaScript s'exécute sur le Lumia.
 - **Lecture du journal** : chaque export crée un nouveau fichier `rhenium-<lancement>-<n>.log` et supprime le précédent, car MTP tronque la copie d'un fichier qui a grossi depuis qu'il l'a vu. Exceptions notées dès leur levée (thread, pile avec noms de DLL), messages `OutputDebugString` et `abort()` captés.- **Démarrage sans user32** (inventaire des chemins Windows de `content_shell`) : écran `aura::TestScreen`, fenêtre `ui::StubWindow`, `SingletonHwnd` jamais créé, ni `InitCommonControlsEx`, ni DPI de bureau, ni OLE, ni module ATL, ni thème sombre, ni fenêtre de notification des périphériques ; préférences de polices et de barres de défilement fixes ; paramètres de lissage des polices fixes.
+## Étape 4 : réseau et TLS
+
+**Atteinte le 2026-10-18**, sans correctif : la page de test (`app\shell_uwp_main.cc`) interroge `https://fr.wikipedia.org/w/api.php?...&origin=*`. Journal : `Rhenium: HTTP 200` 375 ms après le JavaScript, `Rhenium: site Wikipédia` (JSON décodé), puis la page d'accueil de fr.wikipedia.org se charge et ses scripts tournent (message de console de `load.php`). DNS, TCP, TLS (certificat vérifié, sinon la requête échoue) et HTTP passent avec la capability `internetClient`.
+
+Reste : le cache HTTP sur disque ne s'ouvre pas (`Unable to open or create cache entry`), sans effet sur le chargement.
 ## Ce qui change d'échelle
 
 J1 ne touchait que V8 et //base. `content_shell` tire Blink, `//content`, `//net`, Skia, `//cc`, `//components/viz`, `//gpu`, `//ui`, `//media`, `//services`, Mojo, SQLite, ICU complet, ANGLE et une centaine de dépôts tiers : des dizaines de milliers de fichiers, plusieurs heures de compilation, un exe de plus de 100 Mo. Machine de build : Core Ultra 7 265KF (20 cœurs), 32 Go de RAM. F: a été agrandi à 150 Go (129 libres) : sources et sorties restent dans `F:\Rhenium\chromium`.
