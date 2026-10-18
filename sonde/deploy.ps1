@@ -33,21 +33,35 @@ if (-not $Ip) {
 $target = @('-ip', $Ip)
 if ($Pin) { $target += @('-pin', $Pin) }
 
+if (-not $Appx -and -not $Uninstall) {
+  $Appx = Get-ChildItem "$PSScriptRoot\out\RheniumSonde_arm-*.appx" -ErrorAction SilentlyContinue |
+    Where-Object Name -notmatch 'sans-codegen' | Sort-Object LastWriteTime | Select-Object -Last 1 -ExpandProperty FullName
+}
+if (-not $Uninstall -and (-not $Appx -or -not (Test-Path $Appx))) { throw 'Aucun paquet ARM trouvé : lancer d''abord ./build.ps1.' }
+
+# Nom et titre du paquet, lus dans son manifeste (la sonde par défaut, l'app Rhénium de ..\j2).
+$identity = 'Rhenium.Sonde'; $title = 'Sonde Rhénium'
+if ($Appx) {
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $Appx))
+  try {
+    $reader = [IO.StreamReader]::new($zip.GetEntry('AppxManifest.xml').Open())
+    [xml] $manifest = $reader.ReadToEnd()
+    $reader.Dispose()
+  } finally { $zip.Dispose() }
+  $identity = $manifest.Package.Identity.Name
+  $title = $manifest.Package.Properties.DisplayName
+}
+
 # Retire une version déjà installée : WinAppDeployCmd ne réinstalle pas un paquet de même version.
-$installed = (& $tool list @target) | Where-Object { $_ -match '^Rhenium\.Sonde_' } | ForEach-Object { $_.Trim() }
+$installed = (& $tool list @target) | Where-Object { $_ -match "^$([regex]::Escape($identity))_" } | ForEach-Object { $_.Trim() }
 foreach ($name in $installed) {
   Write-Host "Désinstallation de $name"
   & $tool uninstall -package $name @target
 }
 if ($Uninstall) { return }
 
-if (-not $Appx) {
-  $Appx = Get-ChildItem "$PSScriptRoot\out\RheniumSonde_arm-*.appx" -ErrorAction SilentlyContinue |
-    Where-Object Name -notmatch 'sans-codegen' | Sort-Object LastWriteTime | Select-Object -Last 1 -ExpandProperty FullName
-}
-if (-not $Appx -or -not (Test-Path $Appx)) { throw 'Aucun paquet ARM trouvé : lancer d''abord ./build.ps1.' }
-
 Write-Host "Installation de $Appx sur $Ip" -ForegroundColor Cyan
 & $tool install -file (Resolve-Path $Appx) @target
 if ($LASTEXITCODE -ne 0) { throw "Échec de l'installation (code $LASTEXITCODE)" }
-Write-Host 'Installé. Lancer « Sonde Rhénium » depuis la liste des applications du téléphone.' -ForegroundColor Green
+Write-Host "Installé. Lancer « $title » depuis la liste des applications du téléphone." -ForegroundColor Green

@@ -427,6 +427,104 @@ index ff4b1fc300..62bcccb862 100644
          base::ranges::find_if(blit_request.mailboxes(), &gpu::Mailbox::IsZero,
                                &gpu::MailboxHolder::mailbox);
  
+diff --git a/content/app/content_main.cc b/content/app/content_main.cc
+index 3062f57603..142dc74dee 100644
+--- a/content/app/content_main.cc
++++ b/content/app/content_main.cc
+@@ -221,7 +221,9 @@ RunContentProcess(ContentMainParams params,
+ 
+ #if BUILDFLAG(IS_WIN)
+     base::win::RegisterInvalidParamHandler();
++#if !defined(WINUWP)  // Rhénium : ATL ne sert qu'à l'accessibilité de bureau.
+     ui::win::CreateATLModuleIfNeeded();
++#endif
+ #endif  // BUILDFLAG(IS_WIN)
+ 
+ #if !BUILDFLAG(IS_ANDROID)
+diff --git a/content/app/content_main_runner_impl.cc b/content/app/content_main_runner_impl.cc
+index ab6bc68812..c1fc18229a 100644
+--- a/content/app/content_main_runner_impl.cc
++++ b/content/app/content_main_runner_impl.cc
+@@ -868,8 +868,10 @@ int ContentMainRunnerImpl::Initialize(ContentMainParams params) {
+ 
+   // Make sure the 'uxtheme.dll' is pinned and that the process enabled to
+   // support the OS dark mode only for the browser process.
++#if !defined(WINUWP)  // Rhénium : uxtheme absent sous UWP.
+   if (process_type.empty())
+     base::win::AllowDarkModeForApp(true);
++#endif
+ #endif
+ 
+   RegisterContentSchemes(delegate_->ShouldLockSchemeRegistry());
+diff --git a/content/browser/BUILD.gn b/content/browser/BUILD.gn
+index 9c10d729b8..071e7c3f9e 100644
+--- a/content/browser/BUILD.gn
++++ b/content/browser/BUILD.gn
+@@ -2802,7 +2802,6 @@ source_set("browser") {
+     ]
+     libs += [
+       "comctl32.lib",
+-      "dinput8.lib",
+       "dwmapi.lib",
+       "dxguid.lib",
+       "imm32.lib",
+@@ -2811,6 +2810,10 @@ source_set("browser") {
+       "uiautomationcore.lib",
+       "wtsapi32.lib",
+     ]
++    if (current_os != "winuwp") {
++      # Rhénium : pas de DirectInput pour ARM32 ni sur le téléphone.
++      libs += [ "dinput8.lib" ]
++    }
+   }
+ 
+   if (is_android || is_linux) {
+diff --git a/content/browser/browser_main_loop.cc b/content/browser/browser_main_loop.cc
+index 13aae27416..8067b864c1 100644
+--- a/content/browser/browser_main_loop.cc
++++ b/content/browser/browser_main_loop.cc
+@@ -1178,7 +1178,7 @@ void BrowserMainLoop::ShutdownThreadsAndCleanUp() {
+ // On Mac and windows, the monitor needs to be destroyed on the same thread
+ // as they were created. On Linux, the monitor will be deleted when IO thread
+ // goes away.
+-#if BUILDFLAG(IS_WIN)
++#if BUILDFLAG(IS_WIN) && !defined(WINUWP)
+   system_message_window_.reset();
+ #elif BUILDFLAG(IS_MAC)
+   device_monitor_mac_.reset();
+@@ -1353,7 +1353,9 @@ void BrowserMainLoop::PostCreateThreadsImpl() {
+ #endif
+   }
+ 
+-#if BUILDFLAG(IS_WIN)
++#if defined(WINUWP)
++  // Rhénium : pas de fenêtre de notification des périphériques sans user32.
++#elif BUILDFLAG(IS_WIN)
+   system_message_window_ = std::make_unique<media::SystemMessageWindowWin>();
+ #elif (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && defined(USE_UDEV)
+   device_monitor_linux_ = std::make_unique<media::DeviceMonitorLinux>();
+@@ -1466,7 +1468,7 @@ bool BrowserMainLoop::InitializeToolkit() {
+   // (Need to add InitializeToolkit stage to BrowserParts).
+   // See also GTK setup in EarlyInitialization, above, and associated comments.
+ 
+-#if BUILDFLAG(IS_WIN)
++#if BUILDFLAG(IS_WIN) && !defined(WINUWP)  // Rhénium : comctl32 absent sous UWP.
+   INITCOMMONCONTROLSEX config;
+   config.dwSize = sizeof(config);
+   config.dwICC = ICC_WIN95_CLASSES;
+diff --git a/content/browser/browser_main_runner_impl.cc b/content/browser/browser_main_runner_impl.cc
+index 1ce7217210..80fb174e0b 100644
+--- a/content/browser/browser_main_runner_impl.cc
++++ b/content/browser/browser_main_runner_impl.cc
+@@ -92,7 +92,7 @@ int BrowserMainRunnerImpl::Initialize(MainFunctionParams parameters) {
+ 
+     notification_service_ = std::make_unique<NotificationServiceImpl>();
+ 
+-#if BUILDFLAG(IS_WIN)
++#if BUILDFLAG(IS_WIN) && !defined(WINUWP)  // Rhénium : user32 et OLE de bureau.
+     base::win::EnableHighDPISupport();
+     // Ole must be initialized before starting message pump, so that TSF
+     // (Text Services Framework) module can interact with the message pump
 diff --git a/content/browser/devtools/BUILD.gn b/content/browser/devtools/BUILD.gn
 index d9812e6c60..b8e4f6a6a9 100644
 --- a/content/browser/devtools/BUILD.gn
@@ -501,6 +599,39 @@ index 2caaf6314b..b4105d5bff 100644
  
    // BucketState::lock_id_to_iterator_ maps a lock's id to the
    // iterator pointing to its location in its associated request queue.
+diff --git a/content/browser/renderer_host/render_view_host_impl.cc b/content/browser/renderer_host/render_view_host_impl.cc
+index 421a0b8ba2..816c329214 100644
+--- a/content/browser/renderer_host/render_view_host_impl.cc
++++ b/content/browser/renderer_host/render_view_host_impl.cc
+@@ -249,7 +249,27 @@ RenderViewHostImpl* RenderViewHostImpl::From(RenderWidgetHost* rwh) {
+ // static
+ void RenderViewHostImpl::GetPlatformSpecificPrefs(
+     blink::RendererPreferences* prefs) {
+-#if BUILDFLAG(IS_WIN)
++#if defined(WINUWP)
++  // Rhénium : ni SystemParametersInfo ni GetSystemMetrics sous UWP. Valeurs de
++  // Windows 10 à 100 %.
++  for (auto [family, height] :
++       {std::make_pair(&prefs->caption_font_family_name,
++                       &prefs->caption_font_height),
++        std::make_pair(&prefs->small_caption_font_family_name,
++                       &prefs->small_caption_font_height),
++        std::make_pair(&prefs->menu_font_family_name, &prefs->menu_font_height),
++        std::make_pair(&prefs->message_font_family_name,
++                       &prefs->message_font_height),
++        std::make_pair(&prefs->status_font_family_name,
++                       &prefs->status_font_height)}) {
++    *family = u"Segoe UI";
++    *height = 12;
++  }
++  prefs->vertical_scroll_bar_width_in_dips = 17;
++  prefs->horizontal_scroll_bar_height_in_dips = 17;
++  prefs->arrow_bitmap_height_vertical_scroll_bar_in_dips = 17;
++  prefs->arrow_bitmap_width_horizontal_scroll_bar_in_dips = 17;
++#elif BUILDFLAG(IS_WIN)
+   // Note that what is called "height" in this struct is actually the font size;
+   // font "height" typically includes ascender, descender, and padding and is
+   // often a third or so larger than the given font size.
 diff --git a/content/renderer/accessibility/ax_image_annotator.cc b/content/renderer/accessibility/ax_image_annotator.cc
 index 96412327e2..3c662f5bb7 100644
 --- a/content/renderer/accessibility/ax_image_annotator.cc
@@ -619,6 +750,34 @@ index 35f4eaddc8..638479672b 100644
    // Only present when running web tests, which run inside Content Shell.
    //
    // Web tests are not browser tests, so |is_content_browsertests_| and
+diff --git a/content/shell/browser/shell_platform_data_aura.cc b/content/shell/browser/shell_platform_data_aura.cc
+index 72b880eb84..509b8fcbc7 100644
+--- a/content/shell/browser/shell_platform_data_aura.cc
++++ b/content/shell/browser/shell_platform_data_aura.cc
+@@ -27,6 +27,10 @@
+ #if BUILDFLAG(IS_OZONE)
+ #include "ui/aura/screen_ozone.h"
+ #endif
++#if defined(WINUWP)
++#include "ui/aura/test/test_screen.h"
++#include "ui/display/screen.h"
++#endif
+ 
+ namespace content {
+ 
+@@ -83,6 +87,12 @@ ShellPlatformDataAura::ShellPlatformDataAura(const gfx::Size& initial_size) {
+   // Setup global display::Screen singleton.
+   screen_ = std::make_unique<aura::ScopedScreenOzone>();
+ #endif  // BUILDFLAG(IS_OZONE)
++#if defined(WINUWP)
++  // Rhénium : un écran unique sans user32 (ScreenWin énumère les moniteurs).
++  // Il vit jusqu'à la fin du processus.
++  if (!display::Screen::GetScreen())
++    display::Screen::SetScreenInstance(aura::TestScreen::Create(initial_size));
++#endif
+ 
+   ui::PlatformWindowInitProperties properties;
+   properties.bounds = gfx::Rect(initial_size);
 diff --git a/content/test/BUILD.gn b/content/test/BUILD.gn
 index 027fa679e3..177a74d8a0 100644
 --- a/content/test/BUILD.gn
@@ -640,6 +799,44 @@ index 027fa679e3..177a74d8a0 100644
  
    data = [ "//testing/scripts/run_isolated_script_test.py" ]
    data_deps = [
+diff --git a/gin/v8_initializer.cc b/gin/v8_initializer.cc
+index 45da70dd0d..df9160ee01 100644
+--- a/gin/v8_initializer.cc
++++ b/gin/v8_initializer.cc
+@@ -237,6 +237,13 @@ void SetV8FlagsIfOverridden(const base::Feature& feature,
+ 
+ void SetFlags(IsolateHolder::ScriptMode mode,
+               const std::string js_command_line_flags) {
++#if defined(WINUWP)
++  // Rhénium : une app UWP n'a jamais de page à la fois inscriptible et
++  // exécutable. Le JIT écrit son code en W^X (voir v8/src/base/platform/
++  // platform-win32.cc).
++  SetV8Flags("--no-write-code-using-rwx");
++  SetV8Flags("--write-protect-code-memory");
++#endif
+   // We assume that all feature flag defaults correspond to the default
+   // values of the corresponding V8 flags.
+   SetV8FlagsIfOverridden(features::kV8CompactCodeSpaceWithStack,
+diff --git a/gin/v8_platform.cc b/gin/v8_platform.cc
+index a0bc00a3d1..a7741fdf96 100644
+--- a/gin/v8_platform.cc
++++ b/gin/v8_platform.cc
+@@ -326,7 +326,15 @@ V8Platform::~V8Platform() = default;
+ 
+ #if BUILDFLAG(USE_PARTITION_ALLOC)
+ PageAllocator* V8Platform::GetPageAllocator() {
++#if defined(WINUWP)
++  // Rhénium : V8 et cppgc gardent leur propre allocateur de pages, adapté à
++  // UWP en J1 (VirtualAllocFromApp, bascules W^X et attente des pages de code
++  // en cours d'écriture). Celui de PartitionAlloc demande des pages
++  // exécutables à VirtualAlloc, refusé aux apps.
++  return nullptr;
++#else
+   return g_page_allocator.Pointer();
++#endif
+ }
+ 
+ #if BUILDFLAG(ENABLE_THREAD_ISOLATION)
 diff --git a/media/audio/win/audio_low_latency_input_win.cc b/media/audio/win/audio_low_latency_input_win.cc
 index cb3f192994..d1aaffc2ed 100644
 --- a/media/audio/win/audio_low_latency_input_win.cc
@@ -977,6 +1174,20 @@ index ed13e7a44d..b49853069a 100644
        return *this;
      }
      difference_type operator-(const Iterator& rhs) const {
+diff --git a/sandbox/win/BUILD.gn b/sandbox/win/BUILD.gn
+index 35acb31413..8801abb87f 100644
+--- a/sandbox/win/BUILD.gn
++++ b/sandbox/win/BUILD.gn
+@@ -145,6 +145,9 @@ static_library("sandbox") {
+       "src/resolver_32.cc",
+       "src/service_resolver_32.cc",
+     ]
++  } else if (current_cpu == "arm") {
++    # Rhénium : résolveurs inertes, pas d'interception sur ARM32.
++    sources += [ "src/resolver_arm.cc" ]
+   }
+ 
+   # Disable sanitizer coverage in the sandbox code. The sandbox code runs before
 diff --git a/sandbox/win/src/nt_internals.h b/sandbox/win/src/nt_internals.h
 index 9a7c647254..67dd37d934 100644
 --- a/sandbox/win/src/nt_internals.h
@@ -1057,6 +1268,82 @@ index a6159f51fc..99690585bc 100644
  #include "sandbox/win/src/security_level.h"
  
  namespace sandbox {
+diff --git a/sandbox/win/src/resolver_arm.cc b/sandbox/win/src/resolver_arm.cc
+new file mode 100644
+index 0000000000..13c633e222
+--- /dev/null
++++ b/sandbox/win/src/resolver_arm.cc
+@@ -0,0 +1,70 @@
++// Copyright 2026 The Rhénium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Rhénium : pas d'interception de fonctions sur Windows ARM32. L'app Rhénium
++// tourne en single-process, sans processus cible à intercepter : chaque
++// résolution échoue.
++
++#include <ntstatus.h>
++#include <stddef.h>
++
++#include "sandbox/win/src/resolver.h"
++#include "sandbox/win/src/service_resolver.h"
++
++namespace sandbox {
++
++size_t ResolverThunk::GetInternalThunkSize() const {
++  return 0;
++}
++
++bool ResolverThunk::SetInternalThunk(void* storage,
++                                     size_t storage_bytes,
++                                     const void* original_function,
++                                     const void* interceptor) {
++  return false;
++}
++
++NTSTATUS ResolverThunk::ResolveTarget(const void* module,
++                                      const char* function_name,
++                                      void** address) {
++  return STATUS_NOT_IMPLEMENTED;
++}
++
++NTSTATUS ServiceResolverThunk::Setup(const void* target_module,
++                                     const void* interceptor_module,
++                                     const char* target_name,
++                                     const char* interceptor_name,
++                                     const void* interceptor_entry_point,
++                                     void* thunk_storage,
++                                     size_t storage_bytes,
++                                     size_t* storage_used) {
++  return STATUS_NOT_IMPLEMENTED;
++}
++
++size_t ServiceResolverThunk::GetThunkSize() const {
++  return 0;
++}
++
++NTSTATUS ServiceResolverThunk::CopyThunk(const void* target_module,
++                                         const char* target_name,
++                                         BYTE* thunk_storage,
++                                         size_t storage_bytes,
++                                         size_t* storage_used) {
++  return STATUS_NOT_IMPLEMENTED;
++}
++
++bool ServiceResolverThunk::IsFunctionAService(void* local_thunk) const {
++  return false;
++}
++
++NTSTATUS ServiceResolverThunk::PerformPatch(void* local_thunk,
++                                            void* remote_thunk) {
++  return STATUS_NOT_IMPLEMENTED;
++}
++
++bool ServiceResolverThunk::VerifyJumpTargetForTesting(void*) const {
++  return false;
++}
++
++}  // namespace sandbox
 diff --git a/sandbox/win/src/sandbox_nt_util.h b/sandbox/win/src/sandbox_nt_util.h
 index 9a42aa9b00..91a684cd32 100644
 --- a/sandbox/win/src/sandbox_nt_util.h
@@ -1301,6 +1588,29 @@ index 351d22a1f5..780c28a4a2 100644
    if (it != kLevelToELevelIdc.end())
      return it->second;
    return absl::nullopt;
+diff --git a/third_party/blink/renderer/platform/wtf/stack_util.cc b/third_party/blink/renderer/platform/wtf/stack_util.cc
+index 8432101f2b..7f0012cd13 100644
+--- a/third_party/blink/renderer/platform/wtf/stack_util.cc
++++ b/third_party/blink/renderer/platform/wtf/stack_util.cc
+@@ -140,7 +140,8 @@ void* GetStackStart() {
+ #if defined(ARCH_CPU_X86_64)
+   return reinterpret_cast<void*>(
+       reinterpret_cast<NT_TIB64*>(NtCurrentTeb())->StackBase);
+-#elif defined(ARCH_CPU_X86)
++#elif defined(ARCH_CPU_X86) || defined(ARCH_CPU_ARMEL)
++  // Rhénium : ARM32 aussi (sinon la fonction finit sans valeur de retour).
+   return reinterpret_cast<void*>(
+       reinterpret_cast<NT_TIB*>(NtCurrentTeb())->StackBase);
+ #elif defined(ARCH_CPU_ARM64)
+@@ -154,7 +155,7 @@ void* GetStackStart() {
+ }
+ 
+ uintptr_t GetCurrentStackPosition() {
+-#if defined(COMPILER_MSVC)
++#if defined(COMPILER_MSVC) && !defined(_M_ARM)
+   return reinterpret_cast<uintptr_t>(_AddressOfReturnAddress());
+ #else
+   return reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
 diff --git a/third_party/blink/renderer/platform/wtf/text/text_codec_cjk.cc b/third_party/blink/renderer/platform/wtf/text/text_codec_cjk.cc
 index 131cc4eb2a..8f1465866a 100644
 --- a/third_party/blink/renderer/platform/wtf/text/text_codec_cjk.cc
@@ -6570,6 +6880,21 @@ index 0000000000..c5196db4dc
 +#endif
 +
 +#endif
+diff --git a/third_party/libyuv/source/cpu_id.cc b/third_party/libyuv/source/cpu_id.cc
+index 0c4a1581ca..e9324ca5f9 100644
+--- a/third_party/libyuv/source/cpu_id.cc
++++ b/third_party/libyuv/source/cpu_id.cc
+@@ -341,7 +341,9 @@ static SAFEBUFFERS int GetCpuFlags(void) {
+ // flag in it.
+ // So for aarch64, neon enabling is hard coded here.
+ #endif
+-#if defined(__aarch64__)
++#if defined(__aarch64__) || defined(_WIN32)
++  // Rhénium : Windows sur ARM exige Neon, et n'a pas /proc/cpuinfo (le mode
++  // « re » de fopen y est en outre un paramètre invalide).
+   cpu_info = kCpuHasNEON;
+ #else
+   // Linux arm parse text file for neon detect.
 diff --git a/third_party/openscreen/src/util/crypto/random_bytes.cc b/third_party/openscreen/src/util/crypto/random_bytes.cc
 index 6a4c9dcbec..381f4298a3 100644
 --- a/third_party/openscreen/src/util/crypto/random_bytes.cc
@@ -6769,6 +7094,33 @@ index fdd7c761f7..08f30c9cd8 100644
      sources = [ "native_window_occlusion_tracker_win_interactive_test.cc" ]
  
      deps = [
+diff --git a/ui/aura/window_tree_host_platform.cc b/ui/aura/window_tree_host_platform.cc
+index fd4a560f6c..2b2e22605b 100644
+--- a/ui/aura/window_tree_host_platform.cc
++++ b/ui/aura/window_tree_host_platform.cc
+@@ -35,7 +35,9 @@
+ #include "ui/ozone/public/ozone_platform.h"
+ #endif
+ 
+-#if BUILDFLAG(IS_WIN)
++#if defined(WINUWP)
++#include "ui/platform_window/stub/stub_window.h"
++#elif BUILDFLAG(IS_WIN)
+ #include "ui/platform_window/win/win_window.h"
+ #endif
+ 
+@@ -73,6 +75,11 @@ void WindowTreeHostPlatform::CreateAndSetPlatformWindow(
+ #if BUILDFLAG(IS_OZONE)
+   platform_window_ = ui::OzonePlatform::GetInstance()->CreatePlatformWindow(
+       this, std::move(properties));
++#elif defined(WINUWP)
++  // Rhénium : pas de HWND sous UWP. Fenêtre sans affichage pour l'étape 3 ;
++  // la CoreWindow viendra à l'étape 5.
++  platform_window_ = std::make_unique<ui::StubWindow>(
++      this, /*use_default_accelerated_widget=*/true, properties.bounds);
+ #elif BUILDFLAG(IS_WIN)
+   platform_window_ = std::make_unique<ui::WinWindow>(this, properties.bounds);
+ #else
 diff --git a/ui/base/data_transfer_policy/data_transfer_endpoint_serializer.cc b/ui/base/data_transfer_policy/data_transfer_endpoint_serializer.cc
 index 0e33bc97ed..3112577efb 100644
 --- a/ui/base/data_transfer_policy/data_transfer_endpoint_serializer.cc
@@ -6884,6 +7236,50 @@ index abc251015f..43e43b2f61 100644
    if (i != color_name_map.cend()) {
      if (SkColorGetA(color_with_alpha) == SkColorGetA(color))
        return i->second;
+diff --git a/ui/gfx/font_render_params_win.cc b/ui/gfx/font_render_params_win.cc
+index 4769c5853e..6d7deb764a 100644
+--- a/ui/gfx/font_render_params_win.cc
++++ b/ui/gfx/font_render_params_win.cc
+@@ -80,6 +80,12 @@ class CachedFontRenderParams {
+     params_->hinting = FontRenderParams::HINTING_MEDIUM;
+     params_->subpixel_rendering = FontRenderParams::SUBPIXEL_RENDERING_NONE;
+ 
++#if defined(WINUWP)
++    // Rhénium : ni SystemParametersInfo ni fenêtre d'observation sous UWP.
++    // Lissage en niveaux de gris, comme les apps de Windows 10 Mobile.
++    params_->antialiasing = true;
++    params_->subpixel_positioning = true;
++#else
+     BOOL enabled = false;
+     if (SystemParametersInfo(SPI_GETFONTSMOOTHING, 0, &enabled, 0) && enabled) {
+       params_->antialiasing = true;
+@@ -94,6 +100,7 @@ class CachedFontRenderParams {
+     singleton_hwnd_observer_ =
+         std::make_unique<SingletonHwndObserver>(base::BindRepeating(
+             &CachedFontRenderParams::OnWndProc, base::Unretained(this)));
++#endif
+     return *params_;
+   }
+ 
+diff --git a/ui/gfx/win/singleton_hwnd.cc b/ui/gfx/win/singleton_hwnd.cc
+index 489c4ae260..28445b807a 100644
+--- a/ui/gfx/win/singleton_hwnd.cc
++++ b/ui/gfx/win/singleton_hwnd.cc
+@@ -37,12 +37,14 @@ BOOL SingletonHwnd::ProcessWindowMessage(HWND window,
+ }
+ 
+ SingletonHwnd::SingletonHwnd() {
++#if !defined(WINUWP)  // Rhénium : pas de fenêtre sous UWP, hwnd() reste nul.
+   if (!base::CurrentUIThread::IsSet()) {
+     // Creating this window in (e.g.) a renderer inhibits shutdown on
+     // Windows. See http://crbug.com/230122 and http://crbug.com/236039.
+     return;
+   }
+   WindowImpl::Init(NULL, Rect());
++#endif
+ }
+ 
+ SingletonHwnd::~SingletonHwnd() {
 diff --git a/ui/gl/BUILD.gn b/ui/gl/BUILD.gn
 index bea950fb34..bd2f349d13 100644
 --- a/ui/gl/BUILD.gn

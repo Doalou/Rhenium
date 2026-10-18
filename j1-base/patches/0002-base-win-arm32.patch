@@ -1,8 +1,8 @@
 diff --git a/base/BUILD.gn b/base/BUILD.gn
-index 304223b58a..8d2a609c25 100644
+index 304223b58a..538978f757 100644
 --- a/base/BUILD.gn
 +++ b/base/BUILD.gn
-@@ -2016,6 +2016,32 @@ component("base") {
+@@ -2016,6 +2016,33 @@ component("base") {
        # in generated build files.
        "//tools/win/DebugVisualizers/chrome.natvis",
      ]
@@ -20,6 +20,7 @@ index 304223b58a..8d2a609c25 100644
 +        "message_loop/message_pump_uwp.cc",
 +        "message_loop/message_pump_uwp.h",
 +        "process/launch_uwp.cc",
++        "win/message_window_uwp.cc",
 +      ]
 +    }
 +
@@ -312,8 +313,54 @@ index e7328d69b5..bced019fe1 100644
  #else
  #error Unsupported Windows Arch
  #endif
+diff --git a/base/files/file_path.cc b/base/files/file_path.cc
+index 71ca2666bb..5854c2698a 100644
+--- a/base/files/file_path.cc
++++ b/base/files/file_path.cc
+@@ -755,6 +755,25 @@ bool FilePath::ReadFromPickle(PickleIterator* iter) {
+ #if BUILDFLAG(IS_WIN)
+ // Windows specific implementation of file string comparisons.
+ 
++#if defined(WINUWP)
++namespace {
++
++// Rhénium : CharUpperW (user32) manque sous Windows 10 Mobile ; son appel en
++// chargement différé y renvoie 0, et tous les noms se valent. Même mise en
++// majuscules, caractère par caractère : ASCII directement, le reste par
++// LCMapStringEx en locale invariante.
++wchar_t ToUpperForCompare(wchar_t c) {
++  if (c < 0x80)
++    return (c >= L'a' && c <= L'z') ? c - (L'a' - L'A') : c;
++  wchar_t upper = c;
++  ::LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_UPPERCASE, &c, 1, &upper, 1,
++                  nullptr, nullptr, 0);
++  return upper;
++}
++
++}  // namespace
++#endif
++
+ int FilePath::CompareIgnoreCase(StringPieceType string1,
+                                 StringPieceType string2) {
+   // CharUpperW within user32 is used here because it will provide unicode
+@@ -770,10 +789,15 @@ int FilePath::CompareIgnoreCase(StringPieceType string1,
+   StringPieceType::const_iterator string1end = string1.end();
+   StringPieceType::const_iterator string2end = string2.end();
+   for ( ; i1 != string1end && i2 != string2end; ++i1, ++i2) {
++#if defined(WINUWP)
++    wchar_t c1 = ToUpperForCompare(*i1);
++    wchar_t c2 = ToUpperForCompare(*i2);
++#else
+     wchar_t c1 =
+         (wchar_t)LOWORD(::CharUpperW((LPWSTR)(DWORD_PTR)MAKELONG(*i1, 0)));
+     wchar_t c2 =
+         (wchar_t)LOWORD(::CharUpperW((LPWSTR)(DWORD_PTR)MAKELONG(*i2, 0)));
++#endif
+     if (c1 < c2)
+       return -1;
+     if (c1 > c2)
 diff --git a/base/files/file_util_win.cc b/base/files/file_util_win.cc
-index d7b5fb20ae..60f0083fcf 100644
+index d7b5fb20ae..cb6130cdb6 100644
 --- a/base/files/file_util_win.cc
 +++ b/base/files/file_util_win.cc
 @@ -34,6 +34,7 @@
@@ -378,6 +425,27 @@ index d7b5fb20ae..60f0083fcf 100644
        CreateTemporaryDirInDir(parent_dir,
                                prefix.empty() ? kDefaultTempDirPrefix : prefix,
                                new_temp_path)) {
+@@ -1140,6 +1157,12 @@ bool PreReadFile(const FilePath& file_path,
+ }
+ 
+ bool PreventExecuteMapping(const FilePath& path) {
++#if defined(WINUWP)
++  // Rhénium : un seul processus, aucun rendu non fiable à qui retirer
++  // l'exécution. Le contrôle de chemin ci-dessous passe par GetLongPathName,
++  // qui doit lire des dossiers parents fermés à une app UWP.
++  return true;
++#else
+   if (!base::FeatureList::IsEnabled(
+           features::kEnforceNoExecutableFileHandles)) {
+     return true;
+@@ -1192,6 +1215,7 @@ bool PreventExecuteMapping(const FilePath& path) {
+   // ACE if it already exists.
+   return win::DenyAccessToPath(path, *sids, FILE_EXECUTE, /*NO_INHERITANCE=*/0,
+                                /*recursive=*/false);
++#endif  // defined(WINUWP)
+ }
+ 
+ void SetExtraNoExecuteAllowedPath(int path_key) {
 diff --git a/base/functional/bind_internal.h b/base/functional/bind_internal.h
 index 3b3c591874..dfef58234b 100644
 --- a/base/functional/bind_internal.h
@@ -1454,6 +1522,45 @@ index 0c5546fb1b..2b62bbc01f 100644
  
  #pragma comment(linker, "/INCLUDE:_tls_used")
  #pragma comment(linker, "/INCLUDE:p_thread_callback_dllmain_typical_entry")
+diff --git a/base/win/message_window_uwp.cc b/base/win/message_window_uwp.cc
+new file mode 100644
+index 0000000000..f456bf472f
+--- /dev/null
++++ b/base/win/message_window_uwp.cc
+@@ -0,0 +1,33 @@
++// Copyright 2026 The Rhénium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Rhénium : Windows 10 Mobile n'a pas les fonctions de fenêtres de user32.
++// Aucune fenêtre de messages ne peut être créée ; les appelants (moniteurs de
++// session, de périphériques, de batterie, presse-papiers) gèrent cet échec.
++
++#include "base/win/message_window.h"
++
++namespace base {
++namespace win {
++
++MessageWindow::MessageWindow() = default;
++
++MessageWindow::~MessageWindow() = default;
++
++bool MessageWindow::Create(MessageCallback message_callback) {
++  return false;
++}
++
++bool MessageWindow::CreateNamed(MessageCallback message_callback,
++                                const std::wstring& window_name) {
++  return false;
++}
++
++// static
++HWND MessageWindow::FindWindow(const std::wstring& window_name) {
++  return nullptr;
++}
++
++}  // namespace win
++}  // namespace base
 diff --git a/base/win/registry.cc b/base/win/registry.cc
 index 4b3c3d75a2..1ea98d8338 100644
 --- a/base/win/registry.cc

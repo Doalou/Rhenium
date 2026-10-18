@@ -60,6 +60,10 @@ $skiaRev = (Select-String -Path "$src\..\DEPS-116.0.5845.228" -Pattern "'skia_re
 Write-LastChange 'gpu/config/gpu_lists_version.h' 'GPU_LISTS_VERSION' $tagRev
 Write-LastChange 'skia/ext/skia_commit_hash.h' 'SKIA_COMMIT_HASH' $skiaRev
 
+# Sources de l'app (cible rhenium_shell de gn\BUILD.gn).
+New-Item -ItemType Directory -Force "$src\rhenium" | Out-Null
+Copy-Item "$PSScriptRoot\app\*.cc", "$PSScriptRoot\app\*.h", "$PSScriptRoot\..\j1\app\w10m_imports.cc" "$src\rhenium\" -Force
+
 & "$PSScriptRoot\..\j1-base\build-base.ps1" -OutDir 'out\content-arm' -ExtraArgs $extraArgs `
-  -Targets @('rhenium_content') -PatchDirs @("$PSScriptRoot\patches") `
+  -Targets @('rhenium_content', 'rhenium_shell') -PatchDirs @("$PSScriptRoot\patches") `
   -ExtraRootGn "$PSScriptRoot\gn\BUILD.gn" -GenOnly:$GenOnly -KeepGoing:$KeepGoing

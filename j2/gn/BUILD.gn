@@ -1,7 +1,7 @@
 
 # J2 (..\j2\gn\BUILD.gn, ajouté par build-content.ps1) : les bibliothèques de
 # content_shell en single-process. L'exe Win32 content_shell (Crashpad, .rc)
-# n'a pas cours sous UWP : l'app Rhénium les liera elle-même.
+# n'a pas cours sous UWP : l'app Rhénium (rhenium_shell) les lie.
 group("rhenium_content") {
   testonly = true
   deps = [
@@ -9,5 +9,38 @@ group("rhenium_content") {
     "//content/shell:content_shell_lib",
     "//content/shell:pak",
     "//tools/v8_context_snapshot:v8_context_snapshot",
+  ]
+}
+
+# Étape 3 : l'app UWP. Point d'entrée CoreApplication (rhenium/shell_uwp_main.cc,
+# copié depuis ..\j2\app par build-content.ps1) et remplacements des imports
+# absents de Windows 10 Mobile (..\j1\app\w10m_imports.cc). Empaquetée par
+# ..\j2\package-shell.ps1.
+executable("rhenium_shell") {
+  testonly = true
+  sources = [
+    "rhenium/log_export_uwp.cc",
+    "rhenium/log_export_uwp.h",
+    "rhenium/shell_uwp_main.cc",
+    "rhenium/w10m_imports.cc",
+  ]
+  deps = [
+    "//base",
+    "//content/public/app",
+    "//content/shell:content_shell_app",
+    "//content/shell:pak",
+    "//sandbox",
+  ]
+  data_deps = [ "//content/shell:pak" ]
+  defines = [ "RHENIUM_SHELL" ]
+  configs -= [ "//build/config/win:console" ]
+  configs += [
+    "//build/config/win:windowed",
+    "//build/config/win:delayloads",
+    "//build/config/win:delayloads_not_for_child_dll",
+  ]
+  ldflags = [
+    "/APPCONTAINER",
+    "/STACK:0x800000",
   ]
 }
