@@ -33,11 +33,13 @@
 #include "base/path_service.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
+#include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "content/public/app/content_main.h"
 #include "content/shell/app/shell_main_delegate.h"
 #include "rhenium/log_export_uwp.h"
 #include "sandbox/win/src/sandbox_types.h"
+#include "ui/gfx/win/uwp_core_window.h"
 
 namespace {
 
@@ -80,12 +82,20 @@ void BuildCommandLine() {
   base::FilePath local_state;
   base::PathService::Get(base::DIR_LOCAL_APP_DATA, &local_state);
 
-  // Étape 3, sans affichage : rendu, réseau et GPU en threads, compositing
-  // logiciel sans GL (--headless donne aussi le SoftwareOutputDevice sans
-  // fenêtre et une méthode de saisie factice).
+  // Rendu, réseau et GPU en threads, compositing logiciel sans GL, présenté
+  // dans la CoreWindow (software_output_device_uwp.h), qui fixe la taille de
+  // la fenêtre de content_shell.
   command_line->AppendSwitch("single-process");
   command_line->AppendSwitch("no-sandbox");
-  command_line->AppendSwitch("headless");
+  gfx::Size pixel_size;
+  float scale = 1.0f;
+  if (gfx::uwp::GetCoreWindowMetrics(&pixel_size, &scale)) {
+    command_line->AppendSwitchASCII(
+        "content-shell-host-window-size",
+        base::StringPrintf("%dx%d",
+                           static_cast<int>(pixel_size.width() / scale),
+                           static_cast<int>(pixel_size.height() / scale)));
+  }
   command_line->AppendSwitch("disable-gpu");
   command_line->AppendSwitch("disable-software-rasterizer");
   command_line->AppendSwitch("disable-gpu-compositing");

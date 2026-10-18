@@ -89,6 +89,20 @@ App UWP `Rhenium.Shell` : `rhenium_shell.exe` (cible GN `rhenium_shell`, 122 Mo)
 **Atteinte le 2026-10-18**, sans correctif : la page de test (`app\shell_uwp_main.cc`) interroge `https://fr.wikipedia.org/w/api.php?...&origin=*`. Journal : `Rhenium: HTTP 200` 375 ms après le JavaScript, `Rhenium: site Wikipédia` (JSON décodé), puis la page d'accueil de fr.wikipedia.org se charge et ses scripts tournent (message de console de `load.php`). DNS, TCP, TLS (certificat vérifié, sinon la requête échoue) et HTTP passent avec la capability `internetClient`.
 
 Reste : le cache HTTP sur disque ne s'ouvre pas (`Unable to open or create cache entry`), sans effet sur le chargement.
+## Étape 5 : affichage (jalon J2 atteint)
+
+**Atteinte le 2026-10-18 : Wikipédia s'affiche à l'écran du Lumia.** Journal : `UwpWindow : 1440x2560 pixels, échelle 4`, swap chain de la CoreWindow en 1440×2560, première image présentée 0,5 s après le lancement, puis fr.wikipedia.org chargée et rendue.
+
+| Pièce | Fichier | Rôle |
+| --- | --- | --- |
+| CoreWindow | `ui/gfx/win/uwp_core_window.*` | Taille en pixels (`Bounds` × `RawPixelsPerViewPixel`) lue sur le thread UI ; la CoreWindow est gardée pour le compositeur |
+| Fenêtre de plateforme | `ui/platform_window/uwp/uwp_window.*` | Dérivée de `StubWindow`, toujours à la taille de la CoreWindow, widget non nul (jamais utilisé comme HWND) |
+| Écran | `content/shell/browser/shell_platform_data_aura.cc` | `aura::TestScreen` à la taille et à l'échelle réelles |
+| Sortie du compositeur | `components/viz/service/display_embedder/software_output_device_uwp.*` | Bitmap Skia (BGRA) copié en entier dans le tampon arrière d'une swap chain D3D11 `CreateSwapChainForCoreWindow` (flip séquentiel, 2 tampons), puis `Present(1, 0)` |
+| Sans `--headless` | `input_method_factory.cc`, `window_tree_host.cc` | `MockInputMethod` (TSF et IMM32 veulent un HWND), pas de suivi d'occultation |
+| App | `app/shell_uwp_main.cc` | `--content-shell-host-window-size` en DIP depuis la CoreWindow |
+
+Cadence : viz garde une minuterie à 60 Hz (pas de synchro GPU en compositing logiciel). Copie complète de 14,7 Mo par image : à revoir (zone redessinée, tampons conservés) avec le toucher et le défilement en J3.
 ## Ce qui change d'échelle
 
 J1 ne touchait que V8 et //base. `content_shell` tire Blink, `//content`, `//net`, Skia, `//cc`, `//components/viz`, `//gpu`, `//ui`, `//media`, `//services`, Mojo, SQLite, ICU complet, ANGLE et une centaine de dépôts tiers : des dizaines de milliers de fichiers, plusieurs heures de compilation, un exe de plus de 100 Mo. Machine de build : Core Ultra 7 265KF (20 cœurs), 32 Go de RAM. F: a été agrandi à 150 Go (129 libres) : sources et sorties restent dans `F:\Rhenium\chromium`.

@@ -427,6 +427,226 @@ index ff4b1fc300..62bcccb862 100644
          base::ranges::find_if(blit_request.mailboxes(), &gpu::Mailbox::IsZero,
                                &gpu::MailboxHolder::mailbox);
  
+diff --git a/components/viz/service/BUILD.gn b/components/viz/service/BUILD.gn
+index ef3c8ba80d..aaee553024 100644
+--- a/components/viz/service/BUILD.gn
++++ b/components/viz/service/BUILD.gn
+@@ -412,6 +412,17 @@ viz_component("service") {
+       "display_embedder/skia_output_device_buffer_queue.cc",
+       "display_embedder/skia_output_device_buffer_queue.h",
+     ]
++
++    if (current_os == "winuwp") {
++      sources += [
++        "display_embedder/software_output_device_uwp.cc",
++        "display_embedder/software_output_device_uwp.h",
++      ]
++      libs = [
++        "d3d11.lib",
++        "dxgi.lib",
++      ]
++    }
+   }
+ 
+   if (is_fuchsia) {
+diff --git a/components/viz/service/display_embedder/output_surface_provider_impl.cc b/components/viz/service/display_embedder/output_surface_provider_impl.cc
+index 0bc450ca4f..e46d495f21 100644
+--- a/components/viz/service/display_embedder/output_surface_provider_impl.cc
++++ b/components/viz/service/display_embedder/output_surface_provider_impl.cc
+@@ -31,7 +31,9 @@
+ #include "gpu/ipc/common/surface_handle.h"
+ #include "ui/base/ui_base_switches.h"
+ 
+-#if BUILDFLAG(IS_WIN)
++#if defined(WINUWP)
++#include "components/viz/service/display_embedder/software_output_device_uwp.h"
++#elif BUILDFLAG(IS_WIN)
+ #include "components/viz/service/display_embedder/software_output_device_win.h"
+ #endif
+ 
+@@ -144,7 +146,9 @@ OutputSurfaceProviderImpl::CreateSoftwareOutputDeviceForPlatform(
+   if (headless_)
+     return std::make_unique<SoftwareOutputDevice>();
+ 
+-#if BUILDFLAG(IS_WIN)
++#if defined(WINUWP)
++  return std::make_unique<SoftwareOutputDeviceUwp>();
++#elif BUILDFLAG(IS_WIN)
+   return CreateSoftwareOutputDeviceWin(surface_handle, &output_device_backing_,
+                                        display_client);
+ #elif BUILDFLAG(IS_APPLE)
+diff --git a/components/viz/service/display_embedder/software_output_device_uwp.cc b/components/viz/service/display_embedder/software_output_device_uwp.cc
+new file mode 100644
+index 0000000000..b3ef8194d1
+--- /dev/null
++++ b/components/viz/service/display_embedder/software_output_device_uwp.cc
+@@ -0,0 +1,116 @@
++// Copyright 2026 The Rhénium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/viz/service/display_embedder/software_output_device_uwp.h"
++
++#include <iterator>
++
++#include "base/logging.h"
++#include "third_party/skia/include/core/SkPixmap.h"
++#include "third_party/skia/include/core/SkSurface.h"
++#include "ui/gfx/win/uwp_core_window.h"
++
++namespace viz {
++
++using Microsoft::WRL::ComPtr;
++
++SoftwareOutputDeviceUwp::SoftwareOutputDeviceUwp() = default;
++
++SoftwareOutputDeviceUwp::~SoftwareOutputDeviceUwp() = default;
++
++bool SoftwareOutputDeviceUwp::EnsureSwapChain() {
++  if (failed_)
++    return false;
++  if (!device_) {
++    const D3D_FEATURE_LEVEL levels[] = {
++        D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1,
++        D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_9_3,  D3D_FEATURE_LEVEL_9_1};
++    HRESULT hr = E_FAIL;
++    for (D3D_DRIVER_TYPE type : {D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP}) {
++      hr = D3D11CreateDevice(nullptr, type, nullptr,
++                             D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels,
++                             std::size(levels), D3D11_SDK_VERSION, &device_,
++                             nullptr, &context_);
++      if (SUCCEEDED(hr))
++        break;
++    }
++    if (FAILED(hr)) {
++      LOG(ERROR) << "D3D11CreateDevice : " << std::hex << hr;
++      failed_ = true;
++      return false;
++    }
++  }
++
++  if (swap_chain_ && swap_chain_size_ == viewport_pixel_size_)
++    return true;
++
++  if (swap_chain_) {
++    HRESULT hr = swap_chain_->ResizeBuffers(
++        0, viewport_pixel_size_.width(), viewport_pixel_size_.height(),
++        DXGI_FORMAT_UNKNOWN, 0);
++    if (FAILED(hr)) {
++      LOG(ERROR) << "ResizeBuffers : " << std::hex << hr;
++      failed_ = true;
++      return false;
++    }
++    swap_chain_size_ = viewport_pixel_size_;
++    return true;
++  }
++
++  ComPtr<IUnknown> core_window = gfx::uwp::GetCoreWindow();
++  ComPtr<IDXGIDevice> dxgi_device;
++  ComPtr<IDXGIAdapter> adapter;
++  ComPtr<IDXGIFactory2> factory;
++  HRESULT hr = core_window ? device_.As(&dxgi_device) : E_POINTER;
++  if (SUCCEEDED(hr))
++    hr = dxgi_device->GetAdapter(&adapter);
++  if (SUCCEEDED(hr))
++    hr = adapter->GetParent(IID_PPV_ARGS(&factory));
++  if (SUCCEEDED(hr)) {
++    DXGI_SWAP_CHAIN_DESC1 desc = {};
++    desc.Width = viewport_pixel_size_.width();
++    desc.Height = viewport_pixel_size_.height();
++    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
++    desc.SampleDesc.Count = 1;
++    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
++    desc.BufferCount = 2;
++    desc.Scaling = DXGI_SCALING_STRETCH;
++    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
++    desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
++    hr = factory->CreateSwapChainForCoreWindow(
++        device_.Get(), core_window.Get(), &desc, nullptr, &swap_chain_);
++  }
++  if (FAILED(hr)) {
++    LOG(ERROR) << "Swap chain de la CoreWindow : " << std::hex << hr;
++    failed_ = true;
++    return false;
++  }
++  swap_chain_size_ = viewport_pixel_size_;
++  LOG(INFO) << "Swap chain de la CoreWindow : "
++            << viewport_pixel_size_.ToString();
++  return true;
++}
++
++void SoftwareOutputDeviceUwp::EndPaint() {
++  SoftwareOutputDevice::EndPaint();
++  SkPixmap pixmap;
++  if (!surface_ || !surface_->peekPixels(&pixmap) || !EnsureSwapChain())
++    return;
++
++  // Modèle flip : le tampon arrière ne garde pas l'image précédente, on copie
++  // donc toute l'image et pas seulement la zone redessinée.
++  ComPtr<ID3D11Texture2D> back_buffer;
++  if (FAILED(swap_chain_->GetBuffer(0, IID_PPV_ARGS(&back_buffer))))
++    return;
++  context_->UpdateSubresource(back_buffer.Get(), 0, nullptr, pixmap.addr(),
++                              static_cast<UINT>(pixmap.rowBytes()), 0);
++  HRESULT hr = swap_chain_->Present(1, 0);
++  if (FAILED(hr)) {
++    LOG(ERROR) << "Present : " << std::hex << hr;
++  } else if (++frames_ == 1 || frames_ % 300 == 0) {
++    LOG(INFO) << "Images présentées : " << frames_;
++  }
++}
++
++}  // namespace viz
+diff --git a/components/viz/service/display_embedder/software_output_device_uwp.h b/components/viz/service/display_embedder/software_output_device_uwp.h
+new file mode 100644
+index 0000000000..c93281e550
+--- /dev/null
++++ b/components/viz/service/display_embedder/software_output_device_uwp.h
+@@ -0,0 +1,44 @@
++// Copyright 2026 The Rhénium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_VIZ_SERVICE_DISPLAY_EMBEDDER_SOFTWARE_OUTPUT_DEVICE_UWP_H_
++#define COMPONENTS_VIZ_SERVICE_DISPLAY_EMBEDDER_SOFTWARE_OUTPUT_DEVICE_UWP_H_
++
++#include <d3d11.h>
++#include <dxgi1_2.h>
++#include <wrl/client.h>
++
++#include "components/viz/service/display/software_output_device.h"
++#include "components/viz/service/viz_service_export.h"
++
++namespace viz {
++
++// Rhénium : compositing logiciel d'une app UWP. Skia dessine dans le bitmap
++// de SoftwareOutputDevice ; à la fin de chaque image, il est copié dans le
++// tampon arrière d'une swap chain D3D11 créée sur la CoreWindow
++// (ui/gfx/win/uwp_core_window.h), puis présenté.
++class VIZ_SERVICE_EXPORT SoftwareOutputDeviceUwp : public SoftwareOutputDevice {
++ public:
++  SoftwareOutputDeviceUwp();
++  SoftwareOutputDeviceUwp(const SoftwareOutputDeviceUwp&) = delete;
++  SoftwareOutputDeviceUwp& operator=(const SoftwareOutputDeviceUwp&) = delete;
++  ~SoftwareOutputDeviceUwp() override;
++
++  // SoftwareOutputDevice:
++  void EndPaint() override;
++
++ private:
++  bool EnsureSwapChain();
++
++  Microsoft::WRL::ComPtr<ID3D11Device> device_;
++  Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
++  Microsoft::WRL::ComPtr<IDXGISwapChain1> swap_chain_;
++  gfx::Size swap_chain_size_;
++  bool failed_ = false;
++  int frames_ = 0;
++};
++
++}  // namespace viz
++
++#endif  // COMPONENTS_VIZ_SERVICE_DISPLAY_EMBEDDER_SOFTWARE_OUTPUT_DEVICE_UWP_H_
 diff --git a/content/app/content_main.cc b/content/app/content_main.cc
 index 3062f57603..142dc74dee 100644
 --- a/content/app/content_main.cc
@@ -751,29 +971,37 @@ index 35f4eaddc8..638479672b 100644
    //
    // Web tests are not browser tests, so |is_content_browsertests_| and
 diff --git a/content/shell/browser/shell_platform_data_aura.cc b/content/shell/browser/shell_platform_data_aura.cc
-index 72b880eb84..509b8fcbc7 100644
+index 72b880eb84..09a65139a5 100644
 --- a/content/shell/browser/shell_platform_data_aura.cc
 +++ b/content/shell/browser/shell_platform_data_aura.cc
-@@ -27,6 +27,10 @@
+@@ -27,6 +27,11 @@
  #if BUILDFLAG(IS_OZONE)
  #include "ui/aura/screen_ozone.h"
  #endif
 +#if defined(WINUWP)
 +#include "ui/aura/test/test_screen.h"
 +#include "ui/display/screen.h"
++#include "ui/gfx/win/uwp_core_window.h"
 +#endif
  
  namespace content {
  
-@@ -83,6 +87,12 @@ ShellPlatformDataAura::ShellPlatformDataAura(const gfx::Size& initial_size) {
+@@ -83,6 +88,19 @@ ShellPlatformDataAura::ShellPlatformDataAura(const gfx::Size& initial_size) {
    // Setup global display::Screen singleton.
    screen_ = std::make_unique<aura::ScopedScreenOzone>();
  #endif  // BUILDFLAG(IS_OZONE)
 +#if defined(WINUWP)
-+  // Rhénium : un écran unique sans user32 (ScreenWin énumère les moniteurs).
-+  // Il vit jusqu'à la fin du processus.
-+  if (!display::Screen::GetScreen())
-+    display::Screen::SetScreenInstance(aura::TestScreen::Create(initial_size));
++  // Rhénium : un écran unique sans user32 (ScreenWin énumère les moniteurs),
++  // à la taille et à l'échelle de la CoreWindow. Il vit jusqu'à la fin du
++  // processus.
++  if (!display::Screen::GetScreen()) {
++    gfx::Size pixel_size = initial_size;
++    float scale = 1.0f;
++    gfx::uwp::GetCoreWindowMetrics(&pixel_size, &scale);
++    aura::TestScreen* screen = aura::TestScreen::Create(pixel_size);
++    screen->SetDeviceScaleFactor(scale, /*resize_host=*/false);
++    display::Screen::SetScreenInstance(screen);
++  }
 +#endif
  
    ui::PlatformWindowInitProperties properties;
@@ -7080,10 +7308,20 @@ index f676fb4c78..376d42a6b2 100644
      return std::string();
    return iter->second;
 diff --git a/ui/aura/BUILD.gn b/ui/aura/BUILD.gn
-index fdd7c761f7..08f30c9cd8 100644
+index fdd7c761f7..6f97e3a185 100644
 --- a/ui/aura/BUILD.gn
 +++ b/ui/aura/BUILD.gn
-@@ -357,7 +357,9 @@ test("aura_unittests") {
+@@ -162,6 +162,9 @@ component("aura") {
+       "//ipc",
+       "//ui/platform_window/win",
+     ]
++    if (current_os == "winuwp") {
++      deps += [ "//ui/platform_window/uwp" ]
++    }
+   }
+ 
+   if (is_win) {
+@@ -357,7 +360,9 @@ test("aura_unittests") {
  # be source_set, otherwise the linker will drop the tests as dead code.
  source_set("aura_interactive_ui_tests") {
    testonly = true
@@ -7094,8 +7332,27 @@ index fdd7c761f7..08f30c9cd8 100644
      sources = [ "native_window_occlusion_tracker_win_interactive_test.cc" ]
  
      deps = [
+diff --git a/ui/aura/window_tree_host.cc b/ui/aura/window_tree_host.cc
+index 0e32813508..0bf85566b2 100644
+--- a/ui/aura/window_tree_host.cc
++++ b/ui/aura/window_tree_host.cc
+@@ -529,9 +529,14 @@ WindowTreeHost::WindowTreeHost(std::unique_ptr<Window> window)
+ #if BUILDFLAG(IS_WIN)
+   // The feature state is necessary but not sufficient for checking if
+   // occlusion is enabled. It may be disabled by other means (e.g., policy).
++  // Rhénium : le suivi d'occultation énumère les HWND, absents sous UWP.
+   native_window_occlusion_enabled_ =
++#if !defined(WINUWP)
+       !base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kHeadless) &&
+       base::FeatureList::IsEnabled(features::kCalculateNativeWinOcclusion);
++#else
++      false;
++#endif
+ #endif
+ }
+ 
 diff --git a/ui/aura/window_tree_host_platform.cc b/ui/aura/window_tree_host_platform.cc
-index fd4a560f6c..2b2e22605b 100644
+index fd4a560f6c..b9e5a84e06 100644
 --- a/ui/aura/window_tree_host_platform.cc
 +++ b/ui/aura/window_tree_host_platform.cc
 @@ -35,7 +35,9 @@
@@ -7104,20 +7361,18 @@ index fd4a560f6c..2b2e22605b 100644
  
 -#if BUILDFLAG(IS_WIN)
 +#if defined(WINUWP)
-+#include "ui/platform_window/stub/stub_window.h"
++#include "ui/platform_window/uwp/uwp_window.h"
 +#elif BUILDFLAG(IS_WIN)
  #include "ui/platform_window/win/win_window.h"
  #endif
  
-@@ -73,6 +75,11 @@ void WindowTreeHostPlatform::CreateAndSetPlatformWindow(
+@@ -73,6 +75,9 @@ void WindowTreeHostPlatform::CreateAndSetPlatformWindow(
  #if BUILDFLAG(IS_OZONE)
    platform_window_ = ui::OzonePlatform::GetInstance()->CreatePlatformWindow(
        this, std::move(properties));
 +#elif defined(WINUWP)
-+  // Rhénium : pas de HWND sous UWP. Fenêtre sans affichage pour l'étape 3 ;
-+  // la CoreWindow viendra à l'étape 5.
-+  platform_window_ = std::make_unique<ui::StubWindow>(
-+      this, /*use_default_accelerated_widget=*/true, properties.bounds);
++  // Rhénium : pas de HWND sous UWP, la fenêtre est la CoreWindow.
++  platform_window_ = std::make_unique<ui::UwpWindow>(this);
  #elif BUILDFLAG(IS_WIN)
    platform_window_ = std::make_unique<ui::WinWindow>(this, properties.bounds);
  #else
@@ -7134,6 +7389,22 @@ index 0e33bc97ed..3112577efb 100644
    if (it != kEndpointStringToTypeMap.end())
      return it->second;
  
+diff --git a/ui/base/ime/init/input_method_factory.cc b/ui/base/ime/init/input_method_factory.cc
+index 5d4a41a4d6..50fa0a46b7 100644
+--- a/ui/base/ime/init/input_method_factory.cc
++++ b/ui/base/ime/init/input_method_factory.cc
+@@ -53,7 +53,10 @@ std::unique_ptr<InputMethod> CreateInputMethod(
+   if (base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kHeadless))
+     return base::WrapUnique(new MockInputMethod(ime_key_event_dispatcher));
+ 
+-#if BUILDFLAG(IS_WIN)
++#if defined(WINUWP)
++  // Rhénium : TSF et IMM32 veulent un HWND. Saisie de texte : plus tard.
++  return std::make_unique<MockInputMethod>(ime_key_event_dispatcher);
++#elif BUILDFLAG(IS_WIN)
+   if (base::FeatureList::IsEnabled(features::kTSFImeSupport)) {
+     return std::make_unique<InputMethodWinTSF>(ime_key_event_dispatcher,
+                                                widget);
 diff --git a/ui/base/ime/win/tsf_event_router.cc b/ui/base/ime/win/tsf_event_router.cc
 index 7844e5828e..dff95860e5 100644
 --- a/ui/base/ime/win/tsf_event_router.cc
@@ -7236,6 +7507,23 @@ index abc251015f..43e43b2f61 100644
    if (i != color_name_map.cend()) {
      if (SkColorGetA(color_with_alpha) == SkColorGetA(color))
        return i->second;
+diff --git a/ui/gfx/BUILD.gn b/ui/gfx/BUILD.gn
+index f5038c6478..c52ba1c366 100644
+--- a/ui/gfx/BUILD.gn
++++ b/ui/gfx/BUILD.gn
+@@ -227,6 +227,12 @@ component("gfx") {
+       "win/window_impl.h",
+     ]
+   }
++  if (current_os == "winuwp") {
++    sources += [
++      "win/uwp_core_window.cc",
++      "win/uwp_core_window.h",
++    ]
++  }
+   if (is_apple) {
+     sources += [ "font_render_params_mac.cc" ]
+   }
 diff --git a/ui/gfx/font_render_params_win.cc b/ui/gfx/font_render_params_win.cc
 index 4769c5853e..6d7deb764a 100644
 --- a/ui/gfx/font_render_params_win.cc
@@ -7280,6 +7568,139 @@ index 489c4ae260..28445b807a 100644
  }
  
  SingletonHwnd::~SingletonHwnd() {
+diff --git a/ui/gfx/win/uwp_core_window.cc b/ui/gfx/win/uwp_core_window.cc
+new file mode 100644
+index 0000000000..d72b441df0
+--- /dev/null
++++ b/ui/gfx/win/uwp_core_window.cc
+@@ -0,0 +1,91 @@
++// Copyright 2026 The Rhénium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "ui/gfx/win/uwp_core_window.h"
++
++#include <windows.foundation.h>
++#include <windows.graphics.display.h>
++#include <windows.ui.core.h>
++#include <wrl/wrappers/corewrappers.h>
++
++#include <cmath>
++
++#include "base/no_destructor.h"
++#include "base/synchronization/lock.h"
++#include "base/win/core_winrt_util.h"
++
++namespace gfx::uwp {
++
++namespace {
++
++using ABI::Windows::Foundation::Rect;
++using ABI::Windows::Graphics::Display::IDisplayInformation;
++using ABI::Windows::Graphics::Display::IDisplayInformation2;
++using ABI::Windows::Graphics::Display::IDisplayInformationStatics;
++using ABI::Windows::UI::Core::ICoreWindow;
++using ABI::Windows::UI::Core::ICoreWindowStatic;
++using Microsoft::WRL::ComPtr;
++using Microsoft::WRL::Wrappers::HStringReference;
++
++struct Shared {
++  base::Lock lock;
++  ComPtr<IUnknown> window;
++};
++
++Shared& GetShared() {
++  static base::NoDestructor<Shared> shared;
++  return *shared;
++}
++
++}  // namespace
++
++bool GetCoreWindowMetrics(gfx::Size* pixel_size, float* scale) {
++  ComPtr<ICoreWindowStatic> window_statics;
++  ComPtr<ICoreWindow> window;
++  HRESULT hr = base::win::RoGetActivationFactory(
++      HStringReference(RuntimeClass_Windows_UI_Core_CoreWindow).Get(),
++      IID_PPV_ARGS(&window_statics));
++  if (SUCCEEDED(hr))
++    hr = window_statics->GetForCurrentThread(&window);
++  if (FAILED(hr) || !window)
++    return false;
++  Rect bounds = {};
++  if (FAILED(window->get_Bounds(&bounds)))
++    return false;
++
++  double raw_scale = 1.0;
++  ComPtr<IDisplayInformationStatics> display_statics;
++  ComPtr<IDisplayInformation> display;
++  ComPtr<IDisplayInformation2> display2;
++  hr = base::win::RoGetActivationFactory(
++      HStringReference(RuntimeClass_Windows_Graphics_Display_DisplayInformation)
++          .Get(),
++      IID_PPV_ARGS(&display_statics));
++  if (SUCCEEDED(hr))
++    hr = display_statics->GetForCurrentView(&display);
++  if (SUCCEEDED(hr))
++    hr = display.As(&display2);
++  if (SUCCEEDED(hr))
++    display2->get_RawPixelsPerViewPixel(&raw_scale);
++  if (raw_scale <= 0)
++    raw_scale = 1.0;
++
++  *scale = static_cast<float>(raw_scale);
++  *pixel_size =
++      gfx::Size(static_cast<int>(std::lround(bounds.Width * raw_scale)),
++                static_cast<int>(std::lround(bounds.Height * raw_scale)));
++
++  Shared& shared = GetShared();
++  base::AutoLock auto_lock(shared.lock);
++  shared.window = window;
++  return true;
++}
++
++ComPtr<IUnknown> GetCoreWindow() {
++  Shared& shared = GetShared();
++  base::AutoLock auto_lock(shared.lock);
++  return shared.window;
++}
++
++}  // namespace gfx::uwp
+diff --git a/ui/gfx/win/uwp_core_window.h b/ui/gfx/win/uwp_core_window.h
+new file mode 100644
+index 0000000000..ee19272664
+--- /dev/null
++++ b/ui/gfx/win/uwp_core_window.h
+@@ -0,0 +1,30 @@
++// Copyright 2026 The Rhénium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef UI_GFX_WIN_UWP_CORE_WINDOW_H_
++#define UI_GFX_WIN_UWP_CORE_WINDOW_H_
++
++#include <unknwn.h>
++#include <wrl/client.h>
++
++#include "ui/gfx/geometry/size.h"
++#include "ui/gfx/gfx_export.h"
++
++namespace gfx::uwp {
++
++// Rhénium : la CoreWindow de l'app UWP tient lieu de HWND. Lue sur le thread
++// UI (celui de la CoreWindow), elle est gardée pour la sortie du compositeur,
++// qui tourne sur un autre thread.
++
++// Taille de la CoreWindow en pixels et facteur d'échelle de l'écran. À appeler
++// sur le thread UI ; garde aussi la CoreWindow. Faux sans CoreWindow.
++GFX_EXPORT bool GetCoreWindowMetrics(gfx::Size* pixel_size, float* scale);
++
++// CoreWindow gardée par GetCoreWindowMetrics (nulle avant), utilisable depuis
++// tout thread.
++GFX_EXPORT Microsoft::WRL::ComPtr<IUnknown> GetCoreWindow();
++
++}  // namespace gfx::uwp
++
++#endif  // UI_GFX_WIN_UWP_CORE_WINDOW_H_
 diff --git a/ui/gl/BUILD.gn b/ui/gl/BUILD.gn
 index bea950fb34..bd2f349d13 100644
 --- a/ui/gl/BUILD.gn
@@ -7302,6 +7723,128 @@ index bea950fb34..bd2f349d13 100644
      if (angle_shared_libvulkan && !is_chromeos) {
        data_deps += [ "//third_party/vulkan-deps/vulkan-loader/src:libvulkan" ]
      }
+diff --git a/ui/platform_window/uwp/BUILD.gn b/ui/platform_window/uwp/BUILD.gn
+new file mode 100644
+index 0000000000..77a679c1d8
+--- /dev/null
++++ b/ui/platform_window/uwp/BUILD.gn
+@@ -0,0 +1,18 @@
++# Copyright 2026 The Rhénium Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++# Rhénium : fenêtre de plateforme sur la CoreWindow d'une app UWP.
++source_set("uwp") {
++  sources = [
++    "uwp_window.cc",
++    "uwp_window.h",
++  ]
++  deps = [
++    "//base",
++    "//ui/gfx",
++    "//ui/gfx/geometry",
++    "//ui/platform_window",
++    "//ui/platform_window/stub",
++  ]
++}
+diff --git a/ui/platform_window/uwp/uwp_window.cc b/ui/platform_window/uwp/uwp_window.cc
+new file mode 100644
+index 0000000000..fef1bc3d5c
+--- /dev/null
++++ b/ui/platform_window/uwp/uwp_window.cc
+@@ -0,0 +1,48 @@
++// Copyright 2026 The Rhénium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "ui/platform_window/uwp/uwp_window.h"
++
++#include "base/logging.h"
++#include "ui/gfx/win/uwp_core_window.h"
++#include "ui/platform_window/platform_window_delegate.h"
++
++namespace ui {
++
++UwpWindow::UwpWindow(PlatformWindowDelegate* delegate)
++    : StubWindow(delegate, /*use_default_accelerated_widget=*/false) {
++  gfx::Size pixel_size;
++  float scale = 1.0f;
++  if (!gfx::uwp::GetCoreWindowMetrics(&pixel_size, &scale))
++    LOG(ERROR) << "UwpWindow : pas de CoreWindow sur ce thread";
++  bounds_ = gfx::Rect(pixel_size);
++  LOG(INFO) << "UwpWindow : " << pixel_size.ToString() << " pixels, échelle "
++            << scale;
++  // Le widget n'est jamais traité comme un HWND par la sortie UWP du
++  // compositeur ; il doit seulement être non nul.
++  delegate->OnAcceleratedWidgetAvailable(
++      reinterpret_cast<gfx::AcceleratedWidget>(
++          gfx::uwp::GetCoreWindow().Get()));
++}
++
++UwpWindow::~UwpWindow() = default;
++
++void UwpWindow::SetBoundsInPixels(const gfx::Rect& bounds) {
++  bounds_ = gfx::Rect(bounds_.size());
++  delegate()->OnBoundsChanged({/*origin_changed=*/false});
++}
++
++gfx::Rect UwpWindow::GetBoundsInPixels() const {
++  return bounds_;
++}
++
++void UwpWindow::SetBoundsInDIP(const gfx::Rect& bounds) {
++  SetBoundsInPixels(bounds_);
++}
++
++gfx::Rect UwpWindow::GetBoundsInDIP() const {
++  return const_cast<UwpWindow*>(this)->delegate()->ConvertRectToDIP(bounds_);
++}
++
++}  // namespace ui
+diff --git a/ui/platform_window/uwp/uwp_window.h b/ui/platform_window/uwp/uwp_window.h
+new file mode 100644
+index 0000000000..a429a9f510
+--- /dev/null
++++ b/ui/platform_window/uwp/uwp_window.h
+@@ -0,0 +1,38 @@
++// Copyright 2026 The Rhénium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef UI_PLATFORM_WINDOW_UWP_UWP_WINDOW_H_
++#define UI_PLATFORM_WINDOW_UWP_UWP_WINDOW_H_
++
++#include "ui/gfx/geometry/rect.h"
++#include "ui/platform_window/stub/stub_window.h"
++
++namespace ui {
++
++// Rhénium : fenêtre de plateforme d'une app UWP. Elle occupe toute la
++// CoreWindow du thread UI, quelle que soit la taille demandée, et la donne au
++// compositeur comme widget (voir ui/gfx/win/uwp_core_window.h et
++// components/viz/service/display_embedder/software_output_device_uwp.h).
++// Titre, curseur, capture et activation restent ceux de StubWindow ; entrées
++// et changements de taille : plus tard.
++class UwpWindow : public StubWindow {
++ public:
++  explicit UwpWindow(PlatformWindowDelegate* delegate);
++  UwpWindow(const UwpWindow&) = delete;
++  UwpWindow& operator=(const UwpWindow&) = delete;
++  ~UwpWindow() override;
++
++ private:
++  // PlatformWindow:
++  void SetBoundsInPixels(const gfx::Rect& bounds) override;
++  gfx::Rect GetBoundsInPixels() const override;
++  void SetBoundsInDIP(const gfx::Rect& bounds) override;
++  gfx::Rect GetBoundsInDIP() const override;
++
++  gfx::Rect bounds_;
++};
++
++}  // namespace ui
++
++#endif  // UI_PLATFORM_WINDOW_UWP_UWP_WINDOW_H_
 diff --git a/v8/BUILD.gn b/v8/BUILD.gn
 index c13cf053a8..ae7381fb14 100644
 --- a/v8/BUILD.gn

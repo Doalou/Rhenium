@@ -30,6 +30,7 @@ executable("rhenium_shell") {
     "//content/shell:content_shell_app",
     "//content/shell:pak",
     "//sandbox",
+    "//ui/gfx",
   ]
   data_deps = [ "//content/shell:pak" ]
   defines = [ "RHENIUM_SHELL" ]
