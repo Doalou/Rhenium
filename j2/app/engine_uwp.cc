@@ -19,6 +19,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cmath>
 #include <string>
 
@@ -28,18 +29,25 @@
 #include "base/files/file_util.h"
 #include "base/path_service.h"
 #include "base/strings/escape.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "content/public/app/content_main.h"
+#include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/web_contents.h"
 #include "content/shell/app/shell_main_delegate.h"
 #include "content/shell/browser/shell.h"
 #include "content/shell/browser/shell_uwp_host.h"
 #include "rhenium/log_export_uwp.h"
 #include "sandbox/win/src/sandbox_types.h"
+#include "ui/aura/window.h"
+#include "ui/display/display.h"
+#include "ui/display/display_list.h"
+#include "ui/display/screen_base.h"
 #include "ui/events/types/event_type.h"
+#include "ui/gfx/geometry/insets.h"
 #include "ui/gfx/win/uwp_core_window.h"
 #include "ui/platform_window/uwp/uwp_window.h"
 #include "url/gurl.h"
@@ -48,6 +56,12 @@ namespace {
 
 // Recherche quand le texte de la barre n'est pas une adresse.
 constexpr char kSearchUrl[] = "https://duckduckgo.com/?q=";
+
+// Échelle de rendu au plus : au-delà, la rastérisation logicielle coûte plus
+// qu'elle n'apporte à l'œil sur un écran de téléphone. La swap chain est
+// agrandie à l'échelle de l'écran par la composition.
+// --rhenium-render-scale=<n> la fixe (4 : définition native du Lumia 950).
+constexpr float kMaxRenderScale = 3.0f;
 
 content::Shell* GetShell() {
   auto& windows = content::Shell::windows();
@@ -156,8 +170,27 @@ extern "C" void RheniumEngineNote(const wchar_t* text) {
   rhenium::FlushNow();
 }
 
+float RenderScale(float screen_scale) {
+  double forced = 0;
+  if (base::StringToDouble(
+          base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
+              "rhenium-render-scale"),
+          &forced) &&
+      forced >= 1) {
+    return static_cast<float>(forced);
+  }
+  return std::min(screen_scale, kMaxRenderScale);
+}
+
+gfx::Size ToPixels(float width_dip, float height_dip, float scale) {
+  return gfx::Size(static_cast<int>(std::lround(width_dip * scale)),
+                   static_cast<int>(std::lround(height_dip * scale)));
+}
+
 extern "C" int RheniumEngineRun(const RheniumHost* host) {
-  const float scale = host->scale > 0 ? host->scale : 1.0f;
+  BuildCommandLine(*host);
+  const float scale = RenderScale(host->scale > 0 ? host->scale : 1.0f);
+  rhenium::Note("échelle de rendu %.2f (écran %.2f)", scale, host->scale);
   gfx::uwp::SetHostedContentArea(
       gfx::Size(static_cast<int>(std::lround(host->width_dip * scale)),
                 static_cast<int>(std::lround(host->height_dip * scale))),
@@ -170,7 +203,6 @@ extern "C" int RheniumEngineRun(const RheniumHost* host) {
   shell_host.progress_changed = host->progress_changed;
   content::SetShellUwpHost(shell_host);
 
-  BuildCommandLine(*host);
   // Pas de broker : en single-process, aucun processus n'est lancé.
   sandbox::SandboxInterfaceInfo sandbox_info = {nullptr};
   content::ShellMainDelegate delegate;
@@ -237,4 +269,44 @@ extern "C" void RheniumEngineSetWebFocus(int focused) {
   content::Shell* shell = GetShell();
   if (focused && shell)
     shell->web_contents()->Focus();
+}
+
+extern "C" void RheniumEngineResize(float width_dip, float height_dip) {
+  const float scale = gfx::uwp::GetHostedScale();
+  const gfx::Size pixels = ToPixels(width_dip, height_dip, scale);
+  rhenium::Note("zone de contenu %.0fx%.0f DIP", width_dip, height_dip);
+  gfx::uwp::UpdateHostedSize(pixels);
+  if (auto* screen = static_cast<display::ScreenBase*>(display::Screen::GetScreen())) {
+    display::Display display = screen->GetPrimaryDisplay();
+    display.SetScaleAndBounds(scale, gfx::Rect(pixels));
+    screen->display_list().UpdateDisplay(display);
+  }
+  ui::ResizeHostedWindow();
+  // La fenêtre de la page suit celle de l'hôte (FillLayout ne la règle
+  // qu'une fois).
+  const gfx::Rect bounds(gfx::Size(static_cast<int>(std::lround(width_dip)),
+                                   static_cast<int>(std::lround(height_dip))));
+  for (content::Shell* shell : content::Shell::windows())
+    shell->web_contents()->GetNativeView()->SetBounds(bounds);
+}
+
+extern "C" void RheniumEngineSetKeyboardInset(float bottom_dip) {
+  content::Shell* shell = GetShell();
+  if (!shell)
+    return;
+  if (content::RenderWidgetHostView* view =
+          shell->web_contents()->GetRenderWidgetHostView()) {
+    view->SetInsets(gfx::Insets::TLBR(
+        0, 0, static_cast<int>(std::lround(std::max(0.0f, bottom_dip))), 0));
+  }
+}
+
+extern "C" void RheniumEngineSetVisible(int visible) {
+  rhenium::Note(visible ? "app visible" : "app masquée");
+  for (content::Shell* shell : content::Shell::windows()) {
+    if (visible)
+      shell->web_contents()->WasShown();
+    else
+      shell->web_contents()->WasHidden();
+  }
 }

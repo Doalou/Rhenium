@@ -216,6 +216,30 @@ index bf7b04add7..03ea2c6995 100644
    if (result == kComponentMap.end())
      return SystemProfileProto_ComponentId_UNKNOWN;
    return result->second;
+diff --git a/components/network_session_configurator/browser/network_session_configurator.cc b/components/network_session_configurator/browser/network_session_configurator.cc
+index 8e21b0fdb0..23df9849bb 100644
+--- a/components/network_session_configurator/browser/network_session_configurator.cc
++++ b/components/network_session_configurator/browser/network_session_configurator.cc
+@@ -783,6 +783,11 @@ void ParseCommandLineAndFieldTrials(const base::CommandLine& command_line,
+ }
+ 
+ net::URLRequestContextBuilder::HttpCacheParams::Type ChooseCacheType() {
++#if defined(WINUWP)
++  // Rhénium : blockfile projette ses fichiers en mémoire (CreateFileMapping,
++  // refusé aux apps UWP) ; le cache simple n'utilise que des fichiers.
++  return net::URLRequestContextBuilder::HttpCacheParams::DISK_SIMPLE;
++#else
+ #if !BUILDFLAG(IS_ANDROID)
+   const std::string experiment_name =
+       base::FieldTrialList::FindFullName("SimpleCacheTrial");
+@@ -813,6 +818,7 @@ net::URLRequestContextBuilder::HttpCacheParams::Type ChooseCacheType() {
+ #else
+   return net::URLRequestContextBuilder::HttpCacheParams::DISK_BLOCKFILE;
+ #endif
++#endif  // defined(WINUWP)
+ }
+ 
+ }  // namespace network_session_configurator
 diff --git a/components/password_manager/core/browser/import/csv_password.cc b/components/password_manager/core/browser/import/csv_password.cc
 index cc27ad83e9..2cd3709f82 100644
 --- a/components/password_manager/core/browser/import/csv_password.cc
@@ -477,10 +501,10 @@ index 0bc450ca4f..e46d495f21 100644
  #elif BUILDFLAG(IS_APPLE)
 diff --git a/components/viz/service/display_embedder/software_output_device_uwp.cc b/components/viz/service/display_embedder/software_output_device_uwp.cc
 new file mode 100644
-index 0000000000..84095bfd7d
+index 0000000000..248f15453d
 --- /dev/null
 +++ b/components/viz/service/display_embedder/software_output_device_uwp.cc
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,182 @@
 +// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -616,6 +640,7 @@ index 0000000000..84095bfd7d
 +  ComPtr<ID3D11Texture2D> back_buffer;
 +  if (FAILED(swap_chain_->GetBuffer(0, IID_PPV_ARGS(&back_buffer))))
 +    return;
++  const base::TimeTicks copy_start = base::TimeTicks::Now();
 +  if (!copy.IsEmpty()) {
 +    const D3D11_BOX box = {static_cast<UINT>(copy.x()),
 +                           static_cast<UINT>(copy.y()),
@@ -627,21 +652,47 @@ index 0000000000..84095bfd7d
 +                                pixmap.addr32(copy.x(), copy.y()),
 +                                static_cast<UINT>(pixmap.rowBytes()), 0);
 +  }
++  const base::TimeDelta copy_time = base::TimeTicks::Now() - copy_start;
 +  HRESULT hr = swap_chain_->Present(1, 0);
 +  if (FAILED(hr)) {
 +    LOG(ERROR) << "Present : " << std::hex << hr;
-+  } else if (++frames_ == 1 || frames_ % 300 == 0) {
-+    LOG(INFO) << "Images présentées : " << frames_;
++    return;
 +  }
++  if (++frames_ == 1)
++    LOG(INFO) << "Première image présentée";
++  MeasureCadence(copy_time);
++}
++
++void SoftwareOutputDeviceUwp::MeasureCadence(base::TimeDelta copy_time) {
++  const base::TimeTicks now = base::TimeTicks::Now();
++  // Une pause de plus de 200 ms clôt une période d'activité (défilement,
++  // animation) ; chaque seconde pleine est notée.
++  if (burst_frames_ && now - last_frame_ > base::Milliseconds(200))
++    burst_frames_ = 0;
++  last_frame_ = now;
++  if (!burst_frames_) {
++    burst_start_ = now;
++    burst_copy_time_ = base::TimeDelta();
++  }
++  ++burst_frames_;
++  burst_copy_time_ += copy_time;
++  const base::TimeDelta elapsed = now - burst_start_;
++  if (elapsed < base::Seconds(1))
++    return;
++  LOG(INFO) << "Cadence : "
++            << static_cast<int>(burst_frames_ / elapsed.InSecondsF())
++            << " images/s, copie " << (burst_copy_time_ / burst_frames_).InMillisecondsF()
++            << " ms par image, " << viewport_pixel_size_.ToString();
++  burst_frames_ = 0;
 +}
 +
 +}  // namespace viz
 diff --git a/components/viz/service/display_embedder/software_output_device_uwp.h b/components/viz/service/display_embedder/software_output_device_uwp.h
 new file mode 100644
-index 0000000000..ed7195dcc8
+index 0000000000..949527bac7
 --- /dev/null
 +++ b/components/viz/service/display_embedder/software_output_device_uwp.h
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,53 @@
 +// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -653,6 +704,7 @@ index 0000000000..ed7195dcc8
 +#include <dxgi1_3.h>
 +#include <wrl/client.h>
 +
++#include "base/time/time.h"
 +#include "components/viz/service/display/software_output_device.h"
 +#include "components/viz/service/viz_service_export.h"
 +
@@ -674,6 +726,7 @@ index 0000000000..ed7195dcc8
 +
 + private:
 +  bool EnsureSwapChain();
++  void MeasureCadence(base::TimeDelta copy_time);
 +
 +  Microsoft::WRL::ComPtr<ID3D11Device> device_;
 +  Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
@@ -683,6 +736,11 @@ index 0000000000..ed7195dcc8
 +  int fresh_buffers_ = 0;  // présentations encore à faire en entier
 +  bool failed_ = false;
 +  int frames_ = 0;
++  // Cadence mesurée par secondes d'activité, pour le journal.
++  base::TimeTicks burst_start_;
++  base::TimeTicks last_frame_;
++  int burst_frames_ = 0;
++  base::TimeDelta burst_copy_time_;
 +};
 +
 +}  // namespace viz
@@ -860,6 +918,31 @@ index 2caaf6314b..b4105d5bff 100644
  
    // BucketState::lock_id_to_iterator_ maps a lock's id to the
    // iterator pointing to its location in its associated request queue.
+diff --git a/content/browser/renderer_host/media/media_devices_manager.cc b/content/browser/renderer_host/media/media_devices_manager.cc
+index 09c055335e..d1712cdf54 100644
+--- a/content/browser/renderer_host/media/media_devices_manager.cc
++++ b/content/browser/renderer_host/media/media_devices_manager.cc
+@@ -33,6 +33,7 @@
+ #include "content/public/browser/browser_task_traits.h"
+ #include "content/public/browser/browser_thread.h"
+ #include "content/public/common/content_features.h"
++#include "content/public/common/content_switches.h"
+ #include "media/audio/audio_device_description.h"
+ #include "media/audio/audio_system.h"
+ #include "media/base/media_switches.h"
+@@ -551,7 +552,11 @@ void MediaDevicesManager::StartMonitoring() {
+ #endif
+ 
+ #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
+-  if (base::FeatureList::IsEnabled(features::kAudioServiceOutOfProcess)) {
++  // Rhénium : en single-process, le service audio est intégré et n'accepte pas
++  // d'abonnement distant (DCHECK dans audio::Service::BindDeviceNotifier).
++  if (base::FeatureList::IsEnabled(features::kAudioServiceOutOfProcess) &&
++      !base::CommandLine::ForCurrentProcess()->HasSwitch(
++          switches::kSingleProcess)) {
+     DCHECK(!audio_service_device_listener_);
+     audio_service_device_listener_ =
+         std::make_unique<AudioServiceDeviceListener>();
 diff --git a/content/browser/renderer_host/render_view_host_impl.cc b/content/browser/renderer_host/render_view_host_impl.cc
 index 421a0b8ba2..816c329214 100644
 --- a/content/browser/renderer_host/render_view_host_impl.cc
@@ -1047,6 +1130,99 @@ index bbe8635423..ab7732a88e 100644
    void LoadProgressChanged(double progress) override;
  #endif
    void TitleWasSet(NavigationEntry* entry) override;
+diff --git a/content/shell/browser/shell_content_browser_client.cc b/content/shell/browser/shell_content_browser_client.cc
+index 46baba32a0..e5d1196f05 100644
+--- a/content/shell/browser/shell_content_browser_client.cc
++++ b/content/shell/browser/shell_content_browser_client.cc
+@@ -6,6 +6,10 @@
+ 
+ #include <stddef.h>
+ 
++#if defined(WINUWP)
++#include <windows.h>
++#endif
++
+ #include <functional>
+ #include <memory>
+ #include <string>
+@@ -301,11 +305,37 @@ std::unique_ptr<PrefService> CreateLocalState() {
+ }  // namespace
+ 
+ std::string GetShellLanguage() {
++#if defined(WINUWP)
++  // Rhénium : langue du téléphone d'abord, l'anglais ensuite.
++  wchar_t locale[LOCALE_NAME_MAX_LENGTH] = {};
++  if (GetUserDefaultLocaleName(locale, LOCALE_NAME_MAX_LENGTH) > 1) {
++    const std::string tag = base::WideToASCII(locale);
++    const std::string language = tag.substr(0, tag.find('-'));
++    if (language != "en")
++      return tag + "," + language + ",en-us,en";
++  }
++#endif
+   return "en-us,en";
+ }
+ 
+ blink::UserAgentMetadata GetShellUserAgentMetadata() {
+   blink::UserAgentMetadata metadata;
++#if defined(WINUWP)
++  // Rhénium : un navigateur de téléphone. Les sites ne servent leur version
++  // mobile qu'à Android ou iOS, d'où ces indices, cohérents avec
++  // l'agent utilisateur (GetUserAgent).
++  metadata.brand_version_list.emplace_back("Chromium",
++                                           CONTENT_SHELL_MAJOR_VERSION);
++  metadata.brand_version_list.emplace_back("Not)A;Brand", "24");
++  metadata.brand_full_version_list.emplace_back("Chromium",
++                                                CONTENT_SHELL_VERSION);
++  metadata.brand_full_version_list.emplace_back("Not)A;Brand", "24.0.0.0");
++  metadata.full_version = CONTENT_SHELL_VERSION;
++  metadata.platform = "Android";
++  metadata.platform_version = "10.0.0";
++  metadata.mobile = true;
++  return metadata;
++#else
+ 
+   metadata.brand_version_list.emplace_back("content_shell",
+                                            CONTENT_SHELL_MAJOR_VERSION);
+@@ -320,6 +350,7 @@ blink::UserAgentMetadata GetShellUserAgentMetadata() {
+   metadata.wow64 = content::IsWoW64();
+ 
+   return metadata;
++#endif  // defined(WINUWP)
+ }
+ 
+ // static
+@@ -625,6 +656,15 @@ base::FilePath ShellContentBrowserClient::GetFirstPartySetsDirectory() {
+ 
+ std::string ShellContentBrowserClient::GetUserAgent() {
+   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
++#if defined(WINUWP)
++  // Rhénium : agent utilisateur réduit de Chrome pour Android, le seul qui
++  // donne partout la version mobile des sites.
++  if (command_line->HasSwitch(switches::kUseMobileUserAgent)) {
++    return "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
++           "(KHTML, like Gecko) Chrome/" CONTENT_SHELL_MAJOR_VERSION
++           ".0.0.0 Mobile Safari/537.36";
++  }
++#endif
+   return content::GetReducedUserAgent(
+       command_line->HasSwitch(switches::kUseMobileUserAgent),
+       CONTENT_SHELL_MAJOR_VERSION);
+@@ -732,6 +772,15 @@ void ShellContentBrowserClient::ConfigureNetworkContextParamsForShell(
+           "cors_exempt_header_list");
+   if (!exempt_header.empty())
+     context_params->cors_exempt_header_list.push_back(exempt_header);
++#if defined(WINUWP)
++  // Rhénium : cache HTTP sur disque, dans le dossier de données de l'app
++  // (en mémoire seulement dans content_shell).
++  if (!context->IsOffTheRecord()) {
++    context_params->http_cache_directory = network::TransferableDirectory(
++        context->GetPath().Append(FILE_PATH_LITERAL("Cache")));
++    context_params->http_cache_max_size = 64 * 1024 * 1024;
++  }
++#endif
+ }
+ 
+ void ShellContentBrowserClient::GetHyphenationDictionary(
 diff --git a/content/shell/browser/shell_platform_data_aura.cc b/content/shell/browser/shell_platform_data_aura.cc
 index 72b880eb84..2f6278519e 100644
 --- a/content/shell/browser/shell_platform_data_aura.cc
@@ -7731,10 +7907,10 @@ index 1a2a40db4d..f2af94a45e 100644
    public_deps = [ "//ui/base/ime" ]
 diff --git a/ui/base/ime/win/input_method_uwp.cc b/ui/base/ime/win/input_method_uwp.cc
 new file mode 100644
-index 0000000000..cd32a05449
+index 0000000000..bbf2a2db1b
 --- /dev/null
 +++ b/ui/base/ime/win/input_method_uwp.cc
-@@ -0,0 +1,402 @@
+@@ -0,0 +1,463 @@
 +// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -7744,6 +7920,7 @@ index 0000000000..cd32a05449
 +#include <wrl/event.h>
 +#include <wrl/wrappers/corewrappers.h>
 +
++#include <algorithm>
 +#include <string>
 +
 +#include "base/logging.h"
@@ -7769,6 +7946,7 @@ index 0000000000..cd32a05449
 +using Microsoft::WRL::Wrappers::HStringReference;
 +
 +constexpr base::TimeDelta kEnterDedup = base::Milliseconds(300);
++constexpr base::TimeDelta kEditSettle = base::Milliseconds(500);
 +
 +text_core::CoreTextInputScope ToInputScope(TextInputType type) {
 +  switch (type) {
@@ -7925,6 +8103,10 @@ index 0000000000..cd32a05449
 +  selection_ = GetTextInputClient()->GetEditableSelectionRange(&selection)
 +                   ? selection
 +                   : gfx::Range(0);
++  client_selection_ = selection_;
++  if (!GetClientText(&model_text_))
++    model_text_.clear();
++  client_text_ = model_text_;
 +  context_->put_InputScope(ToInputScope(GetTextInputType()));
 +  const HRESULT enter = context_->NotifyFocusEnter();
 +  context_focused_ = true;
@@ -7992,7 +8174,57 @@ index 0000000000..cd32a05449
 +  }
 +  const gfx::Range caret(removed.GetMin());
 +  context_->NotifyTextChanged(ToCoreRange(removed), 0, ToCoreRange(caret));
++  ApplyLocalEdit(removed, std::u16string());
 +  selection_ = caret;
++}
++
++void InputMethodUwp::ApplyLocalEdit(const gfx::Range& range,
++                                    const std::u16string& text) {
++  last_local_edit_ = base::TimeTicks::Now();
++  const size_t start = std::min<size_t>(range.GetMin(), model_text_.size());
++  const size_t end = std::min<size_t>(range.GetMax(), model_text_.size());
++  model_text_.replace(start, end - start, text);
++}
++
++bool InputMethodUwp::GetClientText(std::u16string* text) const {
++  TextInputClient* client = GetTextInputClient();
++  gfx::Range range;
++  if (!client || !client->GetTextRange(&range) || range.GetMin() != 0)
++    return false;
++  return client->GetTextFromRange(range, text);
++}
++
++void InputMethodUwp::ResyncWithClient() {
++  TextInputClient* client = GetTextInputClient();
++  if (!context_ || !context_focused_ || !client ||
++      base::TimeTicks::Now() - last_local_edit_ < kEditSettle) {
++    return;
++  }
++  gfx::Range selection;
++  if (!client->GetEditableSelectionRange(&selection))
++    return;
++  std::u16string text;
++  if (GetClientText(&text) && text != client_text_) {
++    client_text_ = text;
++    if (text != model_text_) {
++      VLOG(1) << "Saisie : texte changé par la page, " << text.size()
++              << " caractère(s)";
++      context_->NotifyTextChanged(
++          ToCoreRange(gfx::Range(0, model_text_.size())),
++          static_cast<INT32>(text.size()), ToCoreRange(selection));
++      model_text_ = text;
++      selection_ = client_selection_ = selection;
++      return;
++    }
++  }
++  if (selection != client_selection_) {
++    client_selection_ = selection;
++    if (selection != selection_) {
++      VLOG(1) << "Saisie : curseur déplacé par la page";
++      selection_ = selection;
++      context_->NotifySelectionChanged(ToCoreRange(selection));
++    }
++  }
 +}
 +
 +void InputMethodUwp::DispatchEnter() {  const base::TimeTicks now = base::TimeTicks::Now();
@@ -8024,6 +8256,8 @@ index 0000000000..cd32a05449
 +
 +void InputMethodUwp::OnCaretBoundsChanged(const TextInputClient* client) {
 +  NotifyTextInputCaretBoundsChanged(client);
++  if (IsTextInputClientFocused(client))
++    ResyncWithClient();
 +}
 +
 +void InputMethodUwp::CancelComposition(const TextInputClient* client) {}
@@ -8112,12 +8346,14 @@ index 0000000000..cd32a05449
 +        client->SetEditableSelectionRange(range);
 +        client->ExtendSelectionAndDelete(0, 0);
 +      }
++      ApplyLocalEdit(range, text);
 +    }
 +  } else if (!text.empty()) {
 +    if (range != selection_)
 +      client->SetEditableSelectionRange(range);
 +    client->InsertText(
 +        text, TextInputClient::InsertTextCursorBehavior::kMoveCursorAfterText);
++    ApplyLocalEdit(range, text);
 +  }
 +  selection_ = FromCoreRange(core_selection);
 +  if (enter)
@@ -8131,6 +8367,7 @@ index 0000000000..cd32a05449
 +  args->get_Selection(&core_selection);
 +  args->put_Result(text_core::CoreTextSelectionUpdatingResult_Succeeded);
 +  selection_ = FromCoreRange(core_selection);
++  last_local_edit_ = base::TimeTicks::Now();
 +  if (TextInputClient* client = GetTextInputClient())
 +    client->SetEditableSelectionRange(selection_);
 +  return S_OK;
@@ -8139,10 +8376,10 @@ index 0000000000..cd32a05449
 +}  // namespace ui
 diff --git a/ui/base/ime/win/input_method_uwp.h b/ui/base/ime/win/input_method_uwp.h
 new file mode 100644
-index 0000000000..dbc5fcc876
+index 0000000000..815aebd231
 --- /dev/null
 +++ b/ui/base/ime/win/input_method_uwp.h
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,103 @@
 +// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -8153,6 +8390,8 @@ index 0000000000..dbc5fcc876
 +#include <windows.ui.text.core.h>
 +#include <windows.ui.viewmanagement.h>
 +#include <wrl/client.h>
++
++#include <string>
 +
 +#include "base/component_export.h"
 +#include "base/time/time.h"
@@ -8165,8 +8404,8 @@ index 0000000000..dbc5fcc876
 +// Mobile passe par un CoreTextEditContext de la CoreWindow : on lui signale
 +// le champ focalisé (le système affiche alors le clavier), il nous envoie les
 +// modifications du texte, appliquées au TextInputClient (le champ de Blink).
-+// Le modèle de texte du système n'est pas resynchronisé sur les changements
-+// faits par la page elle-même ; il repart à chaque changement de focus.
++// Les changements faits par la page elle-même (texte effacé par un script,
++// curseur déplacé d'un toucher) sont reportés au modèle de texte du système.
 +class COMPONENT_EXPORT(UI_BASE_IME_WIN) InputMethodUwp
 +    : public InputMethodBase {
 + public:
@@ -8206,6 +8445,11 @@ index 0000000000..dbc5fcc876
 +          args);
 +  void DispatchEnter();
 +  void OnBackKeyForwarded();
++  // Modifications venues du système, appliquées au modèle tenu ici.
++  void ApplyLocalEdit(const gfx::Range& range, const std::u16string& text);
++  // Texte entier du champ, faux si Blink n'en connaît qu'une partie.
++  bool GetClientText(std::u16string* text) const;
++  void ResyncWithClient();
 +
 +  Microsoft::WRL::ComPtr<ABI::Windows::UI::Text::Core::ICoreTextEditContext>
 +      context_;
@@ -8220,6 +8464,12 @@ index 0000000000..dbc5fcc876
 +  // Sélection telle que la voit le système, tenue ici : celle de Blink arrive
 +  // en différé.
 +  gfx::Range selection_;
++  // Texte du champ tel que le voit le système, et dernier état vu de Blink.
++  std::u16string model_text_;
++  std::u16string client_text_;
++  gfx::Range client_selection_;
++  // Modification locale récente : Blink ne l'a peut-être pas encore reflétée.
++  base::TimeTicks last_local_edit_;
 +  // Entrée peut arriver par le texte (« \r ») et par la touche : une seule.
 +  base::TimeTicks last_text_enter_;
 +  base::TimeTicks last_key_enter_;
@@ -8398,10 +8648,10 @@ index 489c4ae260..28445b807a 100644
  SingletonHwnd::~SingletonHwnd() {
 diff --git a/ui/gfx/win/uwp_core_window.cc b/ui/gfx/win/uwp_core_window.cc
 new file mode 100644
-index 0000000000..69fd39029b
+index 0000000000..251426790f
 --- /dev/null
 +++ b/ui/gfx/win/uwp_core_window.cc
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,150 @@
 +// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -8514,6 +8764,12 @@ index 0000000000..69fd39029b
 +  shared.attacher_context = context;
 +}
 +
++void UpdateHostedSize(const gfx::Size& pixel_size) {
++  Shared& shared = GetShared();
++  base::AutoLock auto_lock(shared.lock);
++  shared.hosted_size = pixel_size;
++}
++
 +bool IsHosted() {
 +  Shared& shared = GetShared();
 +  base::AutoLock auto_lock(shared.lock);
@@ -8548,10 +8804,10 @@ index 0000000000..69fd39029b
 +}  // namespace gfx::uwp
 diff --git a/ui/gfx/win/uwp_core_window.h b/ui/gfx/win/uwp_core_window.h
 new file mode 100644
-index 0000000000..779155b542
+index 0000000000..e0df55c5db
 --- /dev/null
 +++ b/ui/gfx/win/uwp_core_window.h
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,46 @@
 +// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -8588,6 +8844,9 @@ index 0000000000..779155b542
 +                                     float scale,
 +                                     SwapChainAttacher attacher,
 +                                     void* context);
++// Nouvelle taille de la zone de contenu (rotation, clavier, boutons du
++// téléphone), à la même échelle.
++GFX_EXPORT void UpdateHostedSize(const gfx::Size& pixel_size);
 +GFX_EXPORT bool IsHosted();
 +GFX_EXPORT float GetHostedScale();
 +GFX_EXPORT void AttachSwapChain(IUnknown* swap_chain);
@@ -8644,10 +8903,10 @@ index 0000000000..62bf3b75e2
 +}
 diff --git a/ui/platform_window/uwp/uwp_window.cc b/ui/platform_window/uwp/uwp_window.cc
 new file mode 100644
-index 0000000000..006535422b
+index 0000000000..fe7770bd29
 --- /dev/null
 +++ b/ui/platform_window/uwp/uwp_window.cc
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,293 @@
 +// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -8747,6 +9006,11 @@ index 0000000000..006535422b
 +  g_web_focus = focused;
 +}
 +
++void ResizeHostedWindow() {
++  if (g_hosted_window)
++    g_hosted_window->UpdateBounds();
++}
++
 +UwpWindow::UwpWindow(PlatformWindowDelegate* delegate)
 +    : StubWindow(delegate, /*use_default_accelerated_widget=*/false) {
 +  gfx::Size pixel_size;
@@ -8776,6 +9040,17 @@ index 0000000000..006535422b
 +  core_window_->remove_PointerCaptureLost(capture_lost_token_);
 +  core_window_->remove_KeyDown(key_down_token_);
 +  core_window_->remove_KeyUp(key_up_token_);
++}
++
++void UwpWindow::UpdateBounds() {
++  gfx::Size pixel_size;
++  if (!gfx::uwp::GetCoreWindowMetrics(&pixel_size, &scale_) ||
++      pixel_size == bounds_.size()) {
++    return;
++  }
++  bounds_ = gfx::Rect(pixel_size);
++  LOG(INFO) << "UwpWindow : " << pixel_size.ToString() << " pixels";
++  delegate()->OnBoundsChanged({/*origin_changed=*/false});
 +}
 +
 +void UwpWindow::SetBoundsInPixels(const gfx::Rect& bounds) {
@@ -8927,10 +9202,10 @@ index 0000000000..006535422b
 +}  // namespace ui
 diff --git a/ui/platform_window/uwp/uwp_window.h b/ui/platform_window/uwp/uwp_window.h
 new file mode 100644
-index 0000000000..bf210ee43c
+index 0000000000..f6cdb2eb4d
 --- /dev/null
 +++ b/ui/platform_window/uwp/uwp_window.h
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,84 @@
 +// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -8955,7 +9230,7 @@ index 0000000000..bf210ee43c
 +// components/viz/service/display_embedder/software_output_device_uwp.h).
 +// Les pointeurs de la CoreWindow deviennent des événements tactiles (toucher,
 +// stylet) ou souris. Titre, curseur, capture et activation restent ceux de
-+// StubWindow ; changements de taille : plus tard.
++// StubWindow. En mode hébergé, sa taille suit la zone de contenu de la coquille.
 +class UwpWindow : public StubWindow {
 + public:
 +  explicit UwpWindow(PlatformWindowDelegate* delegate);
@@ -8974,6 +9249,8 @@ index 0000000000..bf210ee43c
 +  HRESULT OnPointer(EventType touch_type,
 +                    ABI::Windows::UI::Core::IPointerEventArgs* args);
 +  friend void DispatchHostedPointer(EventType, uint32_t, float, float, bool);
++  friend void ResizeHostedWindow();
++  void UpdateBounds();
 +  void OnPointerAt(EventType touch_type,
 +                   uint32_t id,
 +                   float x_dip,
@@ -9007,6 +9284,8 @@ index 0000000000..bf210ee43c
 +                           float y_dip,
 +                           bool is_mouse);
 +void SetHostedWebFocus(bool focused);
++// La zone de contenu a changé de taille (gfx::uwp::UpdateHostedSize).
++void ResizeHostedWindow();
 +
 +}  // namespace ui
 +

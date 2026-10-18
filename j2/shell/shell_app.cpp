@@ -50,6 +50,8 @@ using Windows::UI::ColorHelper;
 using Windows::UI::Core::CoreDispatcher;
 using Windows::UI::Core::CoreDispatcherPriority;
 using Windows::UI::ViewManagement::ApplicationView;
+using Windows::UI::ViewManagement::InputPane;
+using Windows::UI::ViewManagement::InputPaneVisibilityEventArgs;
 
 namespace {
 
@@ -248,6 +250,22 @@ void StartEngine() {
                             [] { RheniumEngineRun(&g_shell->host); });
 }
 
+// Clavier sur un champ de la page : la mise en page ne bouge pas, la page
+// fait défiler le champ au-dessus du clavier. Sur la barre d'adresse, XAML
+// remonte lui-même l'interface.
+void OnKeyboardShowing(InputPaneVisibilityEventArgs const& args) {
+  ShellState& shell = *g_shell;
+  if (!shell.engine_started ||
+      shell.address.FocusState() != FocusState::Unfocused) {
+    return;
+  }
+  args.EnsuredFocusedElementInView(true);
+  const auto top = shell.panel.TransformToVisual(nullptr).TransformPoint({0, 0});
+  const double bottom = top.Y + shell.panel.ActualHeight();
+  const double covered = bottom - args.OccludedRect().Y;
+  RheniumEngineSetKeyboardInset(static_cast<float>(covered > 0 ? covered : 0));
+}
+
 void ForwardPointer(int kind, PointerRoutedEventArgs const& args) {
   auto point = args.GetCurrentPoint(g_shell->input_surface);
   auto position = point.Position();
@@ -291,8 +309,17 @@ UIElement BuildUi() {
   shell.input_surface = Grid();
   shell.input_surface.Background(Brush(Windows::UI::Colors::Transparent()));
   shell.panel.SizeChanged([](auto&&, auto&&) {
-    if (!g_shell->engine_started && g_shell->panel.ActualWidth() > 0)
+    ShellState& shell = *g_shell;
+    if (shell.panel.ActualWidth() <= 0)
+      return;
+    if (!shell.engine_started) {
       StartEngine();
+    } else {
+      // Lue par RheniumEngineRun si le moteur n'a pas encore démarré.
+      shell.host.width_dip = static_cast<float>(shell.panel.ActualWidth());
+      shell.host.height_dip = static_cast<float>(shell.panel.ActualHeight());
+      RheniumEngineResize(shell.host.width_dip, shell.host.height_dip);
+    }
   });
   shell.input_surface.PointerPressed([](auto&&, PointerRoutedEventArgs const& args) {
     g_shell->input_surface.CapturePointer(args.Pointer());
@@ -427,6 +454,20 @@ struct App : ApplicationT<App> {
       window.Content(BuildUi());
       FitVisibleBounds();
       view.VisibleBoundsChanged([](auto&&, auto&&) { FitVisibleBounds(); });
+      auto input_pane = InputPane::GetForCurrentView();
+      input_pane.Showing([](auto&&, InputPaneVisibilityEventArgs const& args) {
+        OnKeyboardShowing(args);
+      });
+      input_pane.Hiding([](auto&&, auto&&) {
+        if (g_shell->engine_started)
+          RheniumEngineSetKeyboardInset(0);
+      });
+      // Écran d'accueil, verrouillage, suspension : plus de rendu.
+      window.VisibilityChanged(
+          [](auto&&, Windows::UI::Core::VisibilityChangedEventArgs const& args) {
+            if (g_shell->engine_started)
+              RheniumEngineSetVisible(args.Visible() ? 1 : 0);
+          });
       try {
         StyleStatusBar();
       } catch (...) {

@@ -29,13 +29,22 @@ Suite de J2 (`..\j2`, content_shell M116 qui affiche Wikipédia sur le Lumia). L
 - Barre d'adresse : le domaine hors saisie, l'adresse complète à la saisie ; un mot avec un point devient `https://…`, sinon une recherche DuckDuckGo. Progression réelle par `LoadProgressChanged`, étendu de content_shell Android à `WINUWP`.
 - Journal : la coquille y note ses étapes ; une exception XAML non gérée y est écrite avec son message (ainsi trouvé : « Setting 'Background' property is not supported on SwapChainPanel »).
 
+**Fin de J3 (2026-10-19)** : validé sur le Lumia (rotation, clavier, défilement, retour depuis l'accueil, YouTube, sites en version mobile).
+
+- Redimensionnement : `SizeChanged` du `SwapChainPanel` (rotation, boutons du téléphone masqués) appelle `RheniumEngineResize`. Le moteur met à jour la zone hébergée (`gfx::uwp::UpdateHostedSize`), l'écran (`display::ScreenBase`), la fenêtre de plateforme (`ui::ResizeHostedWindow`, qui redimensionne aussi la swap chain) et la fenêtre de la page.
+- Clavier sur un champ de la page : la coquille garde sa mise en page (`EnsuredFocusedElementInView`) et passe la hauteur masquée à `RenderWidgetHostView::SetInsets`, qui fait défiler le champ au-dessus du clavier. Sur la barre d'adresse, XAML remonte lui-même l'interface.
+- Cycle de vie : `VisibilityChanged` de la fenêtre appelle `WebContents::WasHidden` / `WasShown` (écran d'accueil, verrouillage, suspension).
+- Saisie : le modèle de texte du système est resynchronisé quand la page change le texte ou le curseur (`InputMethodUwp::ResyncWithClient`, ignoré 500 ms après une frappe, le temps que Blink la reflète).
+- Cache HTTP : content_shell n'avait qu'un cache en mémoire (le message `Unable to open or create cache entry` est un `DLOG` bénin). Sous `WINUWP`, cache disque de 64 Mo dans `data\Cache`, en backend simple (blockfile projette ses fichiers par `CreateFileMapping`, refusé aux apps).
+- Fluidité : rendu à l'échelle 3 au plus (au lieu de 4 sur le Lumia 950), agrandi par la composition : 44 % de pixels en moins à rastériser. `--rhenium-render-scale=4` dans `rhenium-args.txt` rend la définition native. Le journal note la cadence par seconde d'activité (`Cadence : N images/s`), de 15 à 40 images/s au défilement en paysage.
+- Agent utilisateur : celui, réduit, de Chrome 116 pour Android, mobile, et des indices client cohérents (plateforme Android) ; avec « Windows NT 10.0 », les sites servaient leur version bureau. `Accept-Language` : langue du téléphone d'abord.
+- YouTube : en single-process, `MediaDevicesManager` abonnait le service audio intégré aux changements de périphériques, ce qu'il refuse (`DCHECK` dans `audio::Service::BindDeviceNotifier`) ; l'abonnement distant est réservé au service hors processus.
+
 ## Reste à faire
 
 | Sujet | Piste |
 | --- | --- |
-| Saisie de texte, suite | Composition et suggestions du clavier (soulignement), position du clavier qui masque le champ (`InputPane.Showing`), modèle de texte resynchronisé sur les changements faits par la page |
-| Rotation, changement de taille | `SizeChanged` du `SwapChainPanel` (rotation, boutons du téléphone masqués, clavier) : nouvelles bornes, écran et swap chain redimensionnés ; la taille est encore figée au lancement |
+| Lecture vidéo | Décodeurs coupés à la compilation (`media_use_ffmpeg`, `media_use_libvpx`, `enable_dav1d_decoder` à false) : VP9 / H.264 logiciels, ou décodage matériel par Media Foundation |
+| Saisie de texte, suite | Composition et suggestions du clavier (soulignement) ; champs longs (Blink n'expose qu'une partie du texte, pas de resynchronisation) |
 | Coquille, suite | Avancer, onglets, favoris, menu ; barre masquée au défilement |
-| Cycle de vie | `Suspending` / `Resuming` : rendu suspendu quand l'app est masquée |
-| Cache HTTP sur disque | `Unable to open or create cache entry`, sans effet sur le chargement |
-| Fluidité | Mesurer le défilement (enregistrement d'écran), puis rendu GPU (ANGLE) si le logiciel ne suffit pas |
+| Fluidité | Rendu GPU (ANGLE sur D3D11) si le logiciel ne suffit pas ; mesurer à l'échelle 3 et 4 |

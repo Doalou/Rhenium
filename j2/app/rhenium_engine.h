@@ -67,6 +67,14 @@ void RheniumEnginePointer(int kind, unsigned int id, float x_dip, float y_dip,
 /* La page a-t-elle le clavier (sinon la barre d'adresse) ? */
 void RheniumEngineSetWebFocus(int focused);
 
+/* Nouvelle taille de la zone de contenu (rotation, boutons du téléphone). */
+void RheniumEngineResize(float width_dip, float height_dip);
+/* Hauteur de la zone de contenu masquée par le clavier, en DIP : la page
+ * fait défiler le champ focalisé au-dessus. */
+void RheniumEngineSetKeyboardInset(float bottom_dip);
+/* App visible ou masquée (écran d'accueil, verrouillage) : rendu suspendu. */
+void RheniumEngineSetVisible(int visible);
+
 #ifdef __cplusplus
 }
 #endif

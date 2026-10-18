@@ -35,6 +35,8 @@ executable("rhenium_shell") {
     "//content/shell:content_shell_lib",
     "//content/shell:pak",
     "//sandbox",
+    "//ui/aura",
+    "//ui/display",
     "//ui/events",
     "//ui/gfx",
     "//ui/platform_window/uwp",
