@@ -64,6 +64,12 @@ Write-LastChange 'skia/ext/skia_commit_hash.h' 'SKIA_COMMIT_HASH' $skiaRev
 New-Item -ItemType Directory -Force "$src\rhenium" | Out-Null
 Copy-Item "$PSScriptRoot\app\*.cc", "$PSScriptRoot\app\*.h", "$PSScriptRoot\..\j1\app\w10m_imports.cc" "$src\rhenium\" -Force
 
+# Coquille XAML (MSVC), liée par la cible rhenium_shell.
+if (-not $GenOnly) {
+  New-Item -ItemType Directory -Force "$src\out\content-arm" | Out-Null
+  & "$PSScriptRoot\shell\build-shell.ps1" -OutDir "$src\out\content-arm"
+}
+
 & "$PSScriptRoot\..\j1-base\build-base.ps1" -OutDir 'out\content-arm' -ExtraArgs $extraArgs `
   -Targets @('rhenium_content', 'rhenium_shell') -PatchDirs @("$PSScriptRoot\patches") `
   -ExtraRootGn "$PSScriptRoot\gn\BUILD.gn" -GenOnly:$GenOnly -KeepGoing:$KeepGoing

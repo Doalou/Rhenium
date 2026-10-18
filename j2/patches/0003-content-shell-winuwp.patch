@@ -477,11 +477,11 @@ index 0bc450ca4f..e46d495f21 100644
  #elif BUILDFLAG(IS_APPLE)
 diff --git a/components/viz/service/display_embedder/software_output_device_uwp.cc b/components/viz/service/display_embedder/software_output_device_uwp.cc
 new file mode 100644
-index 0000000000..fc53d29dea
+index 0000000000..84095bfd7d
 --- /dev/null
 +++ b/components/viz/service/display_embedder/software_output_device_uwp.cc
-@@ -0,0 +1,138 @@
-+// Copyright 2026 The Rhénium Authors
+@@ -0,0 +1,155 @@
++// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
@@ -542,11 +542,12 @@ index 0000000000..fc53d29dea
 +    return true;
 +  }
 +
++  const bool hosted = gfx::uwp::IsHosted();
 +  ComPtr<IUnknown> core_window = gfx::uwp::GetCoreWindow();
 +  ComPtr<IDXGIDevice> dxgi_device;
 +  ComPtr<IDXGIAdapter> adapter;
 +  ComPtr<IDXGIFactory2> factory;
-+  HRESULT hr = core_window ? device_.As(&dxgi_device) : E_POINTER;
++  HRESULT hr = (hosted || core_window) ? device_.As(&dxgi_device) : E_POINTER;
 +  if (SUCCEEDED(hr))
 +    hr = dxgi_device->GetAdapter(&adapter);
 +  if (SUCCEEDED(hr))
@@ -562,8 +563,23 @@ index 0000000000..fc53d29dea
 +    desc.Scaling = DXGI_SCALING_STRETCH;
 +    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
 +    desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
-+    hr = factory->CreateSwapChainForCoreWindow(
-+        device_.Get(), core_window.Get(), &desc, nullptr, &swap_chain_);
++    if (hosted) {
++      // SwapChainPanel de la coquille XAML : swap chain de composition, ramenée
++      // de pixels en DIP par sa matrice, posée par la coquille sur le thread UI.
++      hr = factory->CreateSwapChainForComposition(device_.Get(), &desc,
++                                                  nullptr, &swap_chain_);
++      ComPtr<IDXGISwapChain2> swap_chain2;
++      if (SUCCEEDED(hr) && SUCCEEDED(swap_chain_.As(&swap_chain2))) {
++        const float inverse = 1.0f / gfx::uwp::GetHostedScale();
++        const DXGI_MATRIX_3X2_F matrix = {inverse, 0, 0, inverse, 0, 0};
++        swap_chain2->SetMatrixTransform(&matrix);
++      }
++      if (SUCCEEDED(hr))
++        gfx::uwp::AttachSwapChain(swap_chain_.Get());
++    } else {
++      hr = factory->CreateSwapChainForCoreWindow(
++          device_.Get(), core_window.Get(), &desc, nullptr, &swap_chain_);
++    }
 +  }
 +  if (FAILED(hr)) {
 +    LOG(ERROR) << "Swap chain de la CoreWindow : " << std::hex << hr;
@@ -572,7 +588,8 @@ index 0000000000..fc53d29dea
 +  }
 +  swap_chain_size_ = viewport_pixel_size_;
 +  fresh_buffers_ = 2;
-+  LOG(INFO) << "Swap chain de la CoreWindow : "
++  LOG(INFO) << (hosted ? "Swap chain du SwapChainPanel : "
++                       : "Swap chain de la CoreWindow : ")
 +            << viewport_pixel_size_.ToString();
 +  return true;
 +}
@@ -621,11 +638,11 @@ index 0000000000..fc53d29dea
 +}  // namespace viz
 diff --git a/components/viz/service/display_embedder/software_output_device_uwp.h b/components/viz/service/display_embedder/software_output_device_uwp.h
 new file mode 100644
-index 0000000000..fb91b13541
+index 0000000000..ed7195dcc8
 --- /dev/null
 +++ b/components/viz/service/display_embedder/software_output_device_uwp.h
 @@ -0,0 +1,46 @@
-+// Copyright 2026 The Rhénium Authors
++// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
@@ -633,7 +650,7 @@ index 0000000000..fb91b13541
 +#define COMPONENTS_VIZ_SERVICE_DISPLAY_EMBEDDER_SOFTWARE_OUTPUT_DEVICE_UWP_H_
 +
 +#include <d3d11.h>
-+#include <dxgi1_2.h>
++#include <dxgi1_3.h>
 +#include <wrl/client.h>
 +
 +#include "components/viz/service/display/software_output_device.h"
@@ -802,11 +819,11 @@ index d9812e6c60..b8e4f6a6a9 100644
      source = "$root_gen_dir/$devtools_grd_location"
 diff --git a/content/browser/devtools/devtools_resources_uwp.cc b/content/browser/devtools/devtools_resources_uwp.cc
 new file mode 100644
-index 0000000000..6ad2b37474
+index 0000000000..7694c15136
 --- /dev/null
 +++ b/content/browser/devtools/devtools_resources_uwp.cc
 @@ -0,0 +1,14 @@
-+// Copyright 2026 The Rhénium Authors
++// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
@@ -890,7 +907,7 @@ index 96412327e2..3c662f5bb7 100644
      return 0;
  
 diff --git a/content/shell/BUILD.gn b/content/shell/BUILD.gn
-index 5d381713fe..3d35a94288 100644
+index 5d381713fe..d7f499b7e9 100644
 --- a/content/shell/BUILD.gn
 +++ b/content/shell/BUILD.gn
 @@ -52,7 +52,12 @@ config("content_shell_lib_warnings") {
@@ -907,7 +924,17 @@ index 5d381713fe..3d35a94288 100644
  
  source_set("android_shell_descriptors") {
    testonly = true
-@@ -527,7 +532,7 @@ repack("pak") {
+@@ -422,6 +427,9 @@ static_library("content_shell_lib") {
+         "browser/shell_platform_delegate_aura.cc",
+         "browser/shell_web_contents_view_delegate_aura.cc",
+       ]
++      if (current_os == "winuwp") {
++        sources += [ "browser/shell_uwp_host.h" ]
++      }
+     }
+   } else {
+     sources -= [
+@@ -527,7 +535,7 @@ repack("pak") {
      "//ui/strings",
    ]
  
@@ -916,7 +943,7 @@ index 5d381713fe..3d35a94288 100644
      deps += [ "//content/browser/tracing:resources" ]
      sources += [ "$root_gen_dir/content/browser/tracing/tracing_resources.pak" ]
    }
-@@ -548,7 +553,7 @@ repack("pak") {
+@@ -548,7 +556,7 @@ repack("pak") {
      sources +=
          [ "$root_gen_dir/ui/views/resources/views_resources_100_percent.pak" ]
    }
@@ -994,6 +1021,32 @@ index 35f4eaddc8..638479672b 100644
    // Only present when running web tests, which run inside Content Shell.
    //
    // Web tests are not browser tests, so |is_content_browsertests_| and
+diff --git a/content/shell/browser/shell.cc b/content/shell/browser/shell.cc
+index b39a6f0a4c..801fdbcc09 100644
+--- a/content/shell/browser/shell.cc
++++ b/content/shell/browser/shell.cc
+@@ -755,7 +755,7 @@ gfx::Size Shell::GetShellDefaultSize() {
+   return default_shell_size;
+ }
+ 
+-#if BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(IS_ANDROID) || defined(WINUWP)
+ void Shell::LoadProgressChanged(double progress) {
+   g_platform->LoadProgressChanged(this, progress);
+ }
+diff --git a/content/shell/browser/shell.h b/content/shell/browser/shell.h
+index bbe8635423..ab7732a88e 100644
+--- a/content/shell/browser/shell.h
++++ b/content/shell/browser/shell.h
+@@ -217,7 +217,7 @@ class Shell : public WebContentsDelegate, public WebContentsObserver {
+   void ToggleFullscreenModeForTab(WebContents* web_contents,
+                                   bool enter_fullscreen);
+   // WebContentsObserver
+-#if BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(IS_ANDROID) || defined(WINUWP)
+   void LoadProgressChanged(double progress) override;
+ #endif
+   void TitleWasSet(NavigationEntry* entry) override;
 diff --git a/content/shell/browser/shell_platform_data_aura.cc b/content/shell/browser/shell_platform_data_aura.cc
 index 72b880eb84..2f6278519e 100644
 --- a/content/shell/browser/shell_platform_data_aura.cc
@@ -1105,6 +1158,149 @@ index ff67f75d09..2355df0696 100644
  };
  
  }  // namespace content
+diff --git a/content/shell/browser/shell_platform_delegate.h b/content/shell/browser/shell_platform_delegate.h
+index 3744a23f0e..16d56e2c68 100644
+--- a/content/shell/browser/shell_platform_delegate.h
++++ b/content/shell/browser/shell_platform_delegate.h
+@@ -141,7 +141,9 @@ class ShellPlatformDelegate {
+ #if BUILDFLAG(IS_ANDROID)
+   // Forwarded from WebContentsDelegate.
+   void SetOverlayMode(Shell* shell, bool use_overlay_mode);
++#endif
+ 
++#if BUILDFLAG(IS_ANDROID) || defined(WINUWP)
+   // Forwarded from WebContentsObserver.
+   void LoadProgressChanged(Shell* shell, double progress);
+ #endif
+diff --git a/content/shell/browser/shell_platform_delegate_aura.cc b/content/shell/browser/shell_platform_delegate_aura.cc
+index 1831839cda..5766d1774f 100644
+--- a/content/shell/browser/shell_platform_delegate_aura.cc
++++ b/content/shell/browser/shell_platform_delegate_aura.cc
+@@ -13,8 +13,40 @@
+ #include "ui/aura/window.h"
+ #include "ui/aura/window_event_dispatcher.h"
+ 
++#if defined(WINUWP)
++#include <string>
++
++#include "base/strings/utf_string_conversions.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/shell/browser/shell_uwp_host.h"
++#endif
++
+ namespace content {
+ 
++#if defined(WINUWP)
++namespace {
++
++ShellUwpHost& GetUwpHost() {
++  static ShellUwpHost host;
++  return host;
++}
++
++void NotifyLoading(Shell* shell, bool loading) {
++  const ShellUwpHost& host = GetUwpHost();
++  if (!host.loading_changed)
++    return;
++  NavigationController& controller = shell->web_contents()->GetController();
++  host.loading_changed(host.context, loading, controller.CanGoBack(),
++                       controller.CanGoForward());
++}
++
++}  // namespace
++
++void SetShellUwpHost(const ShellUwpHost& host) {
++  GetUwpHost() = host;
++}
++#endif
++
+ struct ShellPlatformDelegate::ShellData {
+   gfx::NativeWindow window;
+ };
+@@ -76,12 +108,33 @@ void ShellPlatformDelegate::EnableUIControl(Shell* shell,
+                                             UIControl control,
+                                             bool is_enabled) {}
+ 
+-void ShellPlatformDelegate::SetAddressBarURL(Shell* shell, const GURL& url) {}
++void ShellPlatformDelegate::SetAddressBarURL(Shell* shell, const GURL& url) {
++#if defined(WINUWP)
++  const ShellUwpHost& host = GetUwpHost();
++  if (host.url_changed) {
++    const std::wstring wide = base::UTF8ToWide(url.spec());
++    host.url_changed(host.context, wide.c_str());
++  }
++  NotifyLoading(shell, shell->web_contents()->IsLoading());
++#endif
++}
+ 
+-void ShellPlatformDelegate::SetIsLoading(Shell* shell, bool loading) {}
++void ShellPlatformDelegate::SetIsLoading(Shell* shell, bool loading) {
++#if defined(WINUWP)
++  NotifyLoading(shell, loading);
++#endif
++}
+ 
+ void ShellPlatformDelegate::SetTitle(Shell* shell,
+-                                     const std::u16string& title) {}
++                                     const std::u16string& title) {
++#if defined(WINUWP)
++  const ShellUwpHost& host = GetUwpHost();
++  if (host.title_changed) {
++    const std::wstring wide(title.begin(), title.end());
++    host.title_changed(host.context, wide.c_str());
++  }
++#endif
++}
+ 
+ void ShellPlatformDelegate::MainFrameCreated(Shell* shell) {}
+ 
+@@ -89,4 +142,12 @@ bool ShellPlatformDelegate::DestroyShell(Shell* shell) {
+   return false;  // Shell destroys itself.
+ }
+ 
++#if defined(WINUWP)
++void ShellPlatformDelegate::LoadProgressChanged(Shell* shell, double progress) {
++  const ShellUwpHost& host = GetUwpHost();
++  if (host.progress_changed)
++    host.progress_changed(host.context, progress);
++}
++#endif
++
+ }  // namespace content
+diff --git a/content/shell/browser/shell_uwp_host.h b/content/shell/browser/shell_uwp_host.h
+new file mode 100644
+index 0000000000..f5ec10cae8
+--- /dev/null
++++ b/content/shell/browser/shell_uwp_host.h
+@@ -0,0 +1,28 @@
++// Copyright 2026 Doalo
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CONTENT_SHELL_BROWSER_SHELL_UWP_HOST_H_
++#define CONTENT_SHELL_BROWSER_SHELL_UWP_HOST_H_
++
++namespace content {
++
++// Rhénium : rappels vers la coquille XAML de l'app UWP (barre d'adresse,
++// précédent, chargement), appelés sur le thread UI par le délégué de
++// plateforme Aura de content_shell.
++struct ShellUwpHost {
++  void* context = nullptr;
++  void (*url_changed)(void* context, const wchar_t* url) = nullptr;
++  void (*loading_changed)(void* context,
++                          int loading,
++                          int can_go_back,
++                          int can_go_forward) = nullptr;
++  void (*title_changed)(void* context, const wchar_t* title) = nullptr;
++  void (*progress_changed)(void* context, double progress) = nullptr;
++};
++
++void SetShellUwpHost(const ShellUwpHost& host);
++
++}  // namespace content
++
++#endif  // CONTENT_SHELL_BROWSER_SHELL_UWP_HOST_H_
 diff --git a/content/test/BUILD.gn b/content/test/BUILD.gn
 index 027fa679e3..177a74d8a0 100644
 --- a/content/test/BUILD.gn
@@ -1597,11 +1793,11 @@ index a6159f51fc..99690585bc 100644
  namespace sandbox {
 diff --git a/sandbox/win/src/resolver_arm.cc b/sandbox/win/src/resolver_arm.cc
 new file mode 100644
-index 0000000000..13c633e222
+index 0000000000..7a826344b3
 --- /dev/null
 +++ b/sandbox/win/src/resolver_arm.cc
 @@ -0,0 +1,70 @@
-+// Copyright 2026 The Rhénium Authors
++// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
@@ -2011,11 +2207,11 @@ index 10e192f311..1c21ec04a4 100644
          "win/safe_terminate_process.asm",
 diff --git a/third_party/crashpad/crashpad/util/misc/capture_context_win_arm.cc b/third_party/crashpad/crashpad/util/misc/capture_context_win_arm.cc
 new file mode 100644
-index 0000000000..fe7f8b33d9
+index 0000000000..7907e4608a
 --- /dev/null
 +++ b/third_party/crashpad/crashpad/util/misc/capture_context_win_arm.cc
 @@ -0,0 +1,27 @@
-+// Copyright 2026 The Rhénium Authors
++// Copyright 2026 Doalo
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
 +// you may not use this file except in compliance with the License.
@@ -7535,11 +7731,11 @@ index 1a2a40db4d..f2af94a45e 100644
    public_deps = [ "//ui/base/ime" ]
 diff --git a/ui/base/ime/win/input_method_uwp.cc b/ui/base/ime/win/input_method_uwp.cc
 new file mode 100644
-index 0000000000..91a3a77528
+index 0000000000..cd32a05449
 --- /dev/null
 +++ b/ui/base/ime/win/input_method_uwp.cc
 @@ -0,0 +1,402 @@
-+// Copyright 2026 The Rhénium Authors
++// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
@@ -7943,11 +8139,11 @@ index 0000000000..91a3a77528
 +}  // namespace ui
 diff --git a/ui/base/ime/win/input_method_uwp.h b/ui/base/ime/win/input_method_uwp.h
 new file mode 100644
-index 0000000000..3ac24088bd
+index 0000000000..dbc5fcc876
 --- /dev/null
 +++ b/ui/base/ime/win/input_method_uwp.h
 @@ -0,0 +1,90 @@
-+// Copyright 2026 The Rhénium Authors
++// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
@@ -8202,11 +8398,11 @@ index 489c4ae260..28445b807a 100644
  SingletonHwnd::~SingletonHwnd() {
 diff --git a/ui/gfx/win/uwp_core_window.cc b/ui/gfx/win/uwp_core_window.cc
 new file mode 100644
-index 0000000000..d72b441df0
+index 0000000000..69fd39029b
 --- /dev/null
 +++ b/ui/gfx/win/uwp_core_window.cc
-@@ -0,0 +1,91 @@
-+// Copyright 2026 The Rhénium Authors
+@@ -0,0 +1,144 @@
++// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
@@ -8239,6 +8435,11 @@ index 0000000000..d72b441df0
 +struct Shared {
 +  base::Lock lock;
 +  ComPtr<IUnknown> window;
++  bool hosted = false;
++  gfx::Size hosted_size;
++  float hosted_scale = 1.0f;
++  SwapChainAttacher attacher = nullptr;
++  void* attacher_context = nullptr;
 +};
 +
 +Shared& GetShared() {
@@ -8258,6 +8459,16 @@ index 0000000000..d72b441df0
 +    hr = window_statics->GetForCurrentThread(&window);
 +  if (FAILED(hr) || !window)
 +    return false;
++  {
++    Shared& shared = GetShared();
++    base::AutoLock auto_lock(shared.lock);
++    shared.window = window;
++    if (shared.hosted) {
++      *pixel_size = shared.hosted_size;
++      *scale = shared.hosted_scale;
++      return true;
++    }
++  }
 +  Rect bounds = {};
 +  if (FAILED(window->get_Bounds(&bounds)))
 +    return false;
@@ -8290,6 +8501,44 @@ index 0000000000..d72b441df0
 +  return true;
 +}
 +
++void SetHostedContentArea(const gfx::Size& pixel_size,
++                          float scale,
++                          SwapChainAttacher attacher,
++                          void* context) {
++  Shared& shared = GetShared();
++  base::AutoLock auto_lock(shared.lock);
++  shared.hosted = true;
++  shared.hosted_size = pixel_size;
++  shared.hosted_scale = scale;
++  shared.attacher = attacher;
++  shared.attacher_context = context;
++}
++
++bool IsHosted() {
++  Shared& shared = GetShared();
++  base::AutoLock auto_lock(shared.lock);
++  return shared.hosted;
++}
++
++float GetHostedScale() {
++  Shared& shared = GetShared();
++  base::AutoLock auto_lock(shared.lock);
++  return shared.hosted_scale;
++}
++
++void AttachSwapChain(IUnknown* swap_chain) {
++  SwapChainAttacher attacher;
++  void* context;
++  {
++    Shared& shared = GetShared();
++    base::AutoLock auto_lock(shared.lock);
++    attacher = shared.attacher;
++    context = shared.attacher_context;
++  }
++  if (attacher)
++    attacher(context, swap_chain);
++}
++
 +ComPtr<IUnknown> GetCoreWindow() {
 +  Shared& shared = GetShared();
 +  base::AutoLock auto_lock(shared.lock);
@@ -8299,11 +8548,11 @@ index 0000000000..d72b441df0
 +}  // namespace gfx::uwp
 diff --git a/ui/gfx/win/uwp_core_window.h b/ui/gfx/win/uwp_core_window.h
 new file mode 100644
-index 0000000000..ee19272664
+index 0000000000..779155b542
 --- /dev/null
 +++ b/ui/gfx/win/uwp_core_window.h
-@@ -0,0 +1,30 @@
-+// Copyright 2026 The Rhénium Authors
+@@ -0,0 +1,43 @@
++// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
@@ -8329,6 +8578,19 @@ index 0000000000..ee19272664
 +// CoreWindow gardée par GetCoreWindowMetrics (nulle avant), utilisable depuis
 +// tout thread.
 +GFX_EXPORT Microsoft::WRL::ComPtr<IUnknown> GetCoreWindow();
++
++// Mode hébergé : une coquille XAML affiche le moteur dans un SwapChainPanel.
++// La zone de contenu remplace alors la CoreWindow dans GetCoreWindowMetrics,
++// et la swap chain du compositeur est créée pour la composition puis confiée
++// à la coquille par |attacher| (appelé depuis le thread du compositeur).
++using SwapChainAttacher = void (*)(void* context, IUnknown* swap_chain);
++GFX_EXPORT void SetHostedContentArea(const gfx::Size& pixel_size,
++                                     float scale,
++                                     SwapChainAttacher attacher,
++                                     void* context);
++GFX_EXPORT bool IsHosted();
++GFX_EXPORT float GetHostedScale();
++GFX_EXPORT void AttachSwapChain(IUnknown* swap_chain);
 +
 +}  // namespace gfx::uwp
 +
@@ -8357,11 +8619,11 @@ index bea950fb34..bd2f349d13 100644
      }
 diff --git a/ui/platform_window/uwp/BUILD.gn b/ui/platform_window/uwp/BUILD.gn
 new file mode 100644
-index 0000000000..3999b95e77
+index 0000000000..62bf3b75e2
 --- /dev/null
 +++ b/ui/platform_window/uwp/BUILD.gn
 @@ -0,0 +1,19 @@
-+# Copyright 2026 The Rhénium Authors
++# Copyright 2026 Doalo
 +# Use of this source code is governed by a BSD-style license that can be
 +# found in the LICENSE file.
 +
@@ -8382,11 +8644,11 @@ index 0000000000..3999b95e77
 +}
 diff --git a/ui/platform_window/uwp/uwp_window.cc b/ui/platform_window/uwp/uwp_window.cc
 new file mode 100644
-index 0000000000..fc2898f19d
+index 0000000000..006535422b
 --- /dev/null
 +++ b/ui/platform_window/uwp/uwp_window.cc
-@@ -0,0 +1,243 @@
-+// Copyright 2026 The Rhénium Authors
+@@ -0,0 +1,277 @@
++// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
@@ -8463,7 +8725,27 @@ index 0000000000..fc2898f19d
 +  return nullptr;
 +}
 +
++UwpWindow* g_hosted_window = nullptr;
++bool g_web_focus = true;
++
 +}  // namespace
++
++void DispatchHostedPointer(EventType touch_type,
++                           uint32_t id,
++                           float x_dip,
++                           float y_dip,
++                           bool is_mouse) {
++  if (!g_hosted_window)
++    return;
++  if (touch_type == ET_TOUCH_CANCELLED)
++    g_hosted_window->CancelTouches();
++  else
++    g_hosted_window->OnPointerAt(touch_type, id, x_dip, y_dip, is_mouse);
++}
++
++void SetHostedWebFocus(bool focused) {
++  g_web_focus = focused;
++}
 +
 +UwpWindow::UwpWindow(PlatformWindowDelegate* delegate)
 +    : StubWindow(delegate, /*use_default_accelerated_widget=*/false) {
@@ -8473,6 +8755,8 @@ index 0000000000..fc2898f19d
 +  bounds_ = gfx::Rect(pixel_size);
 +  LOG(INFO) << "UwpWindow : " << pixel_size.ToString() << " pixels, échelle "
 +            << scale_;
++  if (gfx::uwp::IsHosted())
++    g_hosted_window = this;
 +  SubscribePointerEvents();
 +  // Le widget n'est jamais traité comme un HWND par la sortie UWP du
 +  // compositeur ; il doit seulement être non nul.
@@ -8482,6 +8766,8 @@ index 0000000000..fc2898f19d
 +}
 +
 +UwpWindow::~UwpWindow() {
++  if (g_hosted_window == this)
++    g_hosted_window = nullptr;
 +  if (!core_window_)
 +    return;
 +  core_window_->remove_PointerPressed(pressed_token_);
@@ -8513,6 +8799,18 @@ index 0000000000..fc2898f19d
 +  Microsoft::WRL::ComPtr<IUnknown> window = gfx::uwp::GetCoreWindow();
 +  if (!window || FAILED(window.As(&core_window_)))
 +    return;
++  core_window_->add_KeyDown(
++      Callback<KeyHandler>([this](ICoreWindow*, IKeyEventArgs* args) {
++        return OnKey(ET_KEY_PRESSED, args);
++      }).Get(),
++      &key_down_token_);
++  core_window_->add_KeyUp(
++      Callback<KeyHandler>([this](ICoreWindow*, IKeyEventArgs* args) {
++        return OnKey(ET_KEY_RELEASED, args);
++      }).Get(),
++      &key_up_token_);
++  if (gfx::uwp::IsHosted())
++    return;  // pointeurs reçus par la coquille
 +  core_window_->add_PointerPressed(
 +      Callback<PointerHandler>([this](ICoreWindow*, IPointerEventArgs* args) {
 +        return OnPointer(ET_TOUCH_PRESSED, args);
@@ -8534,16 +8832,6 @@ index 0000000000..fc2898f19d
 +        return S_OK;
 +      }).Get(),
 +      &capture_lost_token_);
-+  core_window_->add_KeyDown(
-+      Callback<KeyHandler>([this](ICoreWindow*, IKeyEventArgs* args) {
-+        return OnKey(ET_KEY_PRESSED, args);
-+      }).Get(),
-+      &key_down_token_);
-+  core_window_->add_KeyUp(
-+      Callback<KeyHandler>([this](ICoreWindow*, IKeyEventArgs* args) {
-+        return OnKey(ET_KEY_RELEASED, args);
-+      }).Get(),
-+      &key_up_token_);
 +}
 +
 +HRESULT UwpWindow::OnKey(EventType type, IKeyEventArgs* args) {
@@ -8551,7 +8839,7 @@ index 0000000000..fc2898f19d
 +  if (FAILED(args->get_VirtualKey(&virtual_key)))
 +    return S_OK;
 +  const SpecialKey* key = FindSpecialKey(virtual_key);
-+  if (!key)
++  if (!key || (gfx::uwp::IsHosted() && !g_web_focus))
 +    return S_OK;
 +  KeyEvent event(type, key->key_code, key->code, EF_NONE, key->key,
 +                 base::TimeTicks::Now());
@@ -8571,12 +8859,21 @@ index 0000000000..fc2898f19d
 +  Microsoft::WRL::ComPtr<IPointerDevice> device;
 +  if (SUCCEEDED(point->get_PointerDevice(&device)) && device)
 +    device->get_PointerDeviceType(&device_type);
++  OnPointerAt(touch_type, id, position.X, position.Y,
++              device_type == PointerDeviceType_Mouse);
++  return S_OK;
++}
 +
-+  // Position en DIP dans la CoreWindow ; Aura attend des pixels.
-+  const gfx::PointF location(position.X * scale_, position.Y * scale_);
++void UwpWindow::OnPointerAt(EventType touch_type,
++                            uint32_t id,
++                            float x_dip,
++                            float y_dip,
++                            bool is_mouse) {
++  // Position en DIP ; Aura attend des pixels.
++  const gfx::PointF location(x_dip * scale_, y_dip * scale_);
 +  const base::TimeTicks now = base::TimeTicks::Now();
 +
-+  if (device_type == PointerDeviceType_Mouse) {
++  if (is_mouse) {
 +    EventType type = ET_MOUSE_MOVED;
 +    int changed = 0;
 +    if (touch_type == ET_TOUCH_PRESSED) {
@@ -8594,7 +8891,7 @@ index 0000000000..fc2898f19d
 +        (mouse_pressed_ || changed) ? EF_LEFT_MOUSE_BUTTON : EF_NONE;
 +    MouseEvent event(type, location, location, now, flags, changed);
 +    delegate()->DispatchEvent(&event);
-+    return S_OK;
++    return;
 +  }
 +
 +  // Toucher et stylet. Un déplacement sans appui (survol du stylet) est
@@ -8602,7 +8899,7 @@ index 0000000000..fc2898f19d
 +  if (touch_type == ET_TOUCH_PRESSED) {
 +    active_touches_.insert(id);
 +  } else if (!active_touches_.contains(id)) {
-+    return S_OK;
++    return;
 +  }
 +  const auto touch_id = static_cast<PointerId>(touch_ids_.GetGeneratedID(id));
 +  if (touch_type == ET_TOUCH_RELEASED) {
@@ -8612,7 +8909,6 @@ index 0000000000..fc2898f19d
 +  TouchEvent event(touch_type, location, location, now,
 +                   PointerDetails(EventPointerType::kTouch, touch_id));
 +  delegate()->DispatchEvent(&event);
-+  return S_OK;
 +}
 +
 +void UwpWindow::CancelTouches() {
@@ -8631,11 +8927,11 @@ index 0000000000..fc2898f19d
 +}  // namespace ui
 diff --git a/ui/platform_window/uwp/uwp_window.h b/ui/platform_window/uwp/uwp_window.h
 new file mode 100644
-index 0000000000..39b69dc008
+index 0000000000..bf210ee43c
 --- /dev/null
 +++ b/ui/platform_window/uwp/uwp_window.h
-@@ -0,0 +1,64 @@
-+// Copyright 2026 The Rhénium Authors
+@@ -0,0 +1,80 @@
++// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
@@ -8677,6 +8973,12 @@ index 0000000000..39b69dc008
 +  void SubscribePointerEvents();
 +  HRESULT OnPointer(EventType touch_type,
 +                    ABI::Windows::UI::Core::IPointerEventArgs* args);
++  friend void DispatchHostedPointer(EventType, uint32_t, float, float, bool);
++  void OnPointerAt(EventType touch_type,
++                   uint32_t id,
++                   float x_dip,
++                   float y_dip,
++                   bool is_mouse);
 +  void CancelTouches();
 +  HRESULT OnKey(EventType type, ABI::Windows::UI::Core::IKeyEventArgs* args);
 +
@@ -8695,6 +8997,16 @@ index 0000000000..39b69dc008
 +  SequentialIDGenerator touch_ids_{0};
 +  bool mouse_pressed_ = false;
 +};
++
++// Mode hébergé (coquille XAML, ui/gfx/win/uwp_core_window.h) : les pointeurs
++// du SwapChainPanel arrivent par la coquille, en DIP, et les touches de la
++// CoreWindow ne vont à la page que si elle a le clavier.
++void DispatchHostedPointer(EventType touch_type,
++                           uint32_t id,
++                           float x_dip,
++                           float y_dip,
++                           bool is_mouse);
++void SetHostedWebFocus(bool focused);
 +
 +}  // namespace ui
 +

@@ -1,4 +1,4 @@
-// Copyright 2026 The Rhénium Authors
+// Copyright 2026 Doalo
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,6 +20,10 @@ void StartLogExport(const std::wstring& journal_path,
 
 // Ajoute une ligne horodatée au journal de l'app.
 void Note(const char* format, ...);
+
+// Recopie tout de suite le journal (pour les étapes qui précèdent un arrêt
+// brutal, que le filtre d'exceptions ne voit pas).
+void FlushNow();
 
 }  // namespace rhenium
 

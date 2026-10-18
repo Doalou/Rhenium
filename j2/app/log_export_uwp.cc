@@ -1,4 +1,4 @@
-// Copyright 2026 The Rhénium Authors
+// Copyright 2026 Doalo
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -377,6 +377,10 @@ void OnAbort(int) {
 
 void StartLogExport(const std::wstring& journal_path,
                     const std::wstring& engine_log_path) {
+  static bool started = false;  // coquille puis moteur : une seule fois
+  if (started)
+    return;
+  started = true;
   g_journal_path = journal_path;
   g_engine_log_path = engine_log_path;
   InitializeCriticalSectionEx(&g_export_lock, 0, 0);
@@ -389,6 +393,10 @@ void StartLogExport(const std::wstring& journal_path,
   HANDLE thread = CreateThread(nullptr, 0, &ExportThread, nullptr, 0, nullptr);
   if (thread)
     CloseHandle(thread);
+}
+
+void FlushNow() {
+  Export(3000);
 }
 
 void Note(const char* format, ...) {
