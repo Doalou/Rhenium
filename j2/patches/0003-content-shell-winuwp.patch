@@ -995,22 +995,51 @@ index 35f4eaddc8..638479672b 100644
    //
    // Web tests are not browser tests, so |is_content_browsertests_| and
 diff --git a/content/shell/browser/shell_platform_data_aura.cc b/content/shell/browser/shell_platform_data_aura.cc
-index 72b880eb84..09a65139a5 100644
+index 72b880eb84..2f6278519e 100644
 --- a/content/shell/browser/shell_platform_data_aura.cc
 +++ b/content/shell/browser/shell_platform_data_aura.cc
-@@ -27,6 +27,11 @@
+@@ -27,11 +27,40 @@
  #if BUILDFLAG(IS_OZONE)
  #include "ui/aura/screen_ozone.h"
  #endif
 +#if defined(WINUWP)
 +#include "ui/aura/test/test_screen.h"
 +#include "ui/display/screen.h"
++#include "ui/events/event.h"
++#include "ui/events/event_handler.h"
 +#include "ui/gfx/win/uwp_core_window.h"
 +#endif
  
  namespace content {
  
-@@ -83,6 +88,19 @@ ShellPlatformDataAura::ShellPlatformDataAura(const gfx::Size& initial_size) {
+ namespace {
+ 
++#if defined(WINUWP)
++// Rhénium : un appui donne le focus à la fenêtre Aura touchée (la vue web),
++// comme wm::FocusController sous Chromium de bureau. Sans lui, la vue créée
++// par une navigation n'a pas le focus et ses champs n'ont pas de clavier.
++class FocusOnPress : public ui::EventHandler {
++ private:
++  void OnMouseEvent(ui::MouseEvent* event) override {
++    if (event->type() == ui::ET_MOUSE_PRESSED)
++      Focus(event);
++  }
++  void OnTouchEvent(ui::TouchEvent* event) override {
++    if (event->type() == ui::ET_TOUCH_PRESSED)
++      Focus(event);
++  }
++  void Focus(ui::Event* event) {
++    auto* window = static_cast<aura::Window*>(event->target());
++    if (window && window->CanFocus() && !window->HasFocus())
++      window->Focus();
++  }
++};
++#endif
++
+ class FillLayout : public aura::LayoutManager {
+  public:
+   explicit FillLayout(aura::Window* root)
+@@ -83,6 +112,19 @@ ShellPlatformDataAura::ShellPlatformDataAura(const gfx::Size& initial_size) {
    // Setup global display::Screen singleton.
    screen_ = std::make_unique<aura::ScopedScreenOzone>();
  #endif  // BUILDFLAG(IS_OZONE)
@@ -1030,6 +1059,52 @@ index 72b880eb84..09a65139a5 100644
  
    ui::PlatformWindowInitProperties properties;
    properties.bounds = gfx::Rect(initial_size);
+@@ -95,6 +137,10 @@ ShellPlatformDataAura::ShellPlatformDataAura(const gfx::Size& initial_size) {
+ 
+   focus_client_ =
+       std::make_unique<aura::test::TestFocusClient>(host_->window());
++#if defined(WINUWP)
++  focus_on_press_ = std::make_unique<FocusOnPress>();
++  host_->window()->AddPreTargetHandler(focus_on_press_.get());
++#endif
+ 
+   new wm::DefaultActivationClient(host_->window());
+   capture_client_ =
+@@ -110,6 +156,9 @@ ShellPlatformDataAura::ShellPlatformDataAura(const gfx::Size& initial_size) {
+ }
+ 
+ ShellPlatformDataAura::~ShellPlatformDataAura() {
++#if defined(WINUWP)
++  host_->window()->RemovePreTargetHandler(focus_on_press_.get());
++#endif
+   aura::client::SetCursorShapeClient(nullptr);
+ }
+ 
+diff --git a/content/shell/browser/shell_platform_data_aura.h b/content/shell/browser/shell_platform_data_aura.h
+index ff67f75d09..2355df0696 100644
+--- a/content/shell/browser/shell_platform_data_aura.h
++++ b/content/shell/browser/shell_platform_data_aura.h
+@@ -29,6 +29,10 @@ namespace gfx {
+ class Size;
+ }
+ 
++namespace ui {
++class EventHandler;
++}
++
+ namespace content {
+ 
+ class ShellPlatformDataAura {
+@@ -55,6 +59,9 @@ class ShellPlatformDataAura {
+   std::unique_ptr<aura::client::DefaultCaptureClient> capture_client_;
+   std::unique_ptr<aura::client::WindowParentingClient> window_parenting_client_;
+   std::unique_ptr<aura::client::CursorShapeClient> cursor_shape_client_;
++#if defined(WINUWP)
++  std::unique_ptr<ui::EventHandler> focus_on_press_;
++#endif
+ };
+ 
+ }  // namespace content
 diff --git a/content/test/BUILD.gn b/content/test/BUILD.gn
 index 027fa679e3..177a74d8a0 100644
 --- a/content/test/BUILD.gn
@@ -7414,21 +7489,554 @@ index 0e33bc97ed..3112577efb 100644
      return it->second;
  
 diff --git a/ui/base/ime/init/input_method_factory.cc b/ui/base/ime/init/input_method_factory.cc
-index 5d4a41a4d6..50fa0a46b7 100644
+index 5d4a41a4d6..ae8c1e5e9f 100644
 --- a/ui/base/ime/init/input_method_factory.cc
 +++ b/ui/base/ime/init/input_method_factory.cc
-@@ -53,7 +53,10 @@ std::unique_ptr<InputMethod> CreateInputMethod(
+@@ -12,6 +12,9 @@
+ #include "ui/base/ui_base_features.h"
+ #include "ui/gfx/switches.h"
+ 
++#if defined(WINUWP)
++#include "ui/base/ime/win/input_method_uwp.h"
++#endif
+ #if BUILDFLAG(IS_WIN)
+ #include "ui/base/ime/win/input_method_win_imm32.h"
+ #include "ui/base/ime/win/input_method_win_tsf.h"
+@@ -53,7 +56,11 @@ std::unique_ptr<InputMethod> CreateInputMethod(
    if (base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kHeadless))
      return base::WrapUnique(new MockInputMethod(ime_key_event_dispatcher));
  
 -#if BUILDFLAG(IS_WIN)
 +#if defined(WINUWP)
-+  // Rhénium : TSF et IMM32 veulent un HWND. Saisie de texte : plus tard.
-+  return std::make_unique<MockInputMethod>(ime_key_event_dispatcher);
++  // Rhénium : TSF et IMM32 veulent un HWND ; le clavier virtuel passe par
++  // le CoreTextEditContext de la CoreWindow.
++  return std::make_unique<InputMethodUwp>(ime_key_event_dispatcher);
 +#elif BUILDFLAG(IS_WIN)
    if (base::FeatureList::IsEnabled(features::kTSFImeSupport)) {
      return std::make_unique<InputMethodWinTSF>(ime_key_event_dispatcher,
                                                 widget);
+diff --git a/ui/base/ime/win/BUILD.gn b/ui/base/ime/win/BUILD.gn
+index 1a2a40db4d..f2af94a45e 100644
+--- a/ui/base/ime/win/BUILD.gn
++++ b/ui/base/ime/win/BUILD.gn
+@@ -33,6 +33,13 @@ component("win") {
+     "virtual_keyboard_debounce_timer.h",
+   ]
+ 
++  if (current_os == "winuwp") {
++    sources += [
++      "input_method_uwp.cc",
++      "input_method_uwp.h",
++    ]
++  }
++
+   defines = [ "IS_UI_BASE_IME_WIN_IMPL" ]
+ 
+   public_deps = [ "//ui/base/ime" ]
+diff --git a/ui/base/ime/win/input_method_uwp.cc b/ui/base/ime/win/input_method_uwp.cc
+new file mode 100644
+index 0000000000..91a3a77528
+--- /dev/null
++++ b/ui/base/ime/win/input_method_uwp.cc
+@@ -0,0 +1,402 @@
++// Copyright 2026 The Rhénium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "ui/base/ime/win/input_method_uwp.h"
++
++#include <wrl/event.h>
++#include <wrl/wrappers/corewrappers.h>
++
++#include <string>
++
++#include "base/logging.h"
++#include "base/strings/string_util.h"
++#include "base/win/core_winrt_util.h"
++#include "base/win/scoped_hstring.h"
++#include "ui/base/ime/text_input_client.h"
++#include "ui/events/event.h"
++#include "ui/events/keycodes/dom/dom_code.h"
++#include "ui/events/keycodes/dom/dom_key.h"
++#include "ui/events/keycodes/keyboard_codes.h"
++
++namespace ui {
++
++namespace {
++
++namespace text_core = ABI::Windows::UI::Text::Core;
++using ABI::Windows::Foundation::ITypedEventHandler;
++using ABI::Windows::UI::ViewManagement::IInputPane;
++using ABI::Windows::UI::ViewManagement::IInputPaneStatics;
++using Microsoft::WRL::Callback;
++using Microsoft::WRL::ComPtr;
++using Microsoft::WRL::Wrappers::HStringReference;
++
++constexpr base::TimeDelta kEnterDedup = base::Milliseconds(300);
++
++text_core::CoreTextInputScope ToInputScope(TextInputType type) {
++  switch (type) {
++    case TEXT_INPUT_TYPE_PASSWORD:
++      return text_core::CoreTextInputScope_Password;
++    case TEXT_INPUT_TYPE_SEARCH:
++      return text_core::CoreTextInputScope_Search;
++    case TEXT_INPUT_TYPE_EMAIL:
++      return text_core::CoreTextInputScope_EmailAddress;
++    case TEXT_INPUT_TYPE_NUMBER:
++      return text_core::CoreTextInputScope_Number;
++    case TEXT_INPUT_TYPE_TELEPHONE:
++      return text_core::CoreTextInputScope_TelephoneNumber;
++    case TEXT_INPUT_TYPE_URL:
++      return text_core::CoreTextInputScope_Url;
++    default:
++      return text_core::CoreTextInputScope_Text;
++  }
++}
++
++text_core::CoreTextRange ToCoreRange(const gfx::Range& range) {
++  return {static_cast<INT32>(range.GetMin()),
++          static_cast<INT32>(range.GetMax())};
++}
++
++gfx::Range FromCoreRange(const text_core::CoreTextRange& range) {
++  return gfx::Range(static_cast<uint32_t>(range.StartCaretPosition),
++                    static_cast<uint32_t>(range.EndCaretPosition));
++}
++
++}  // namespace
++
++InputMethodUwp::InputMethodUwp(ImeKeyEventDispatcher* ime_key_event_dispatcher)
++    : InputMethodBase(ime_key_event_dispatcher) {
++  CreateEditContext();
++}
++
++InputMethodUwp::~InputMethodUwp() {
++  if (!context_)
++    return;
++  if (context_focused_)
++    context_->NotifyFocusLeave();
++  context_->remove_TextRequested(text_requested_token_);
++  context_->remove_SelectionRequested(selection_requested_token_);
++  context_->remove_TextUpdating(text_updating_token_);
++  context_->remove_SelectionUpdating(selection_updating_token_);
++  context_->remove_FocusRemoved(focus_removed_token_);
++}
++
++void InputMethodUwp::CreateEditContext() {
++  ComPtr<text_core::ICoreTextServicesManagerStatics> statics;
++  ComPtr<text_core::ICoreTextServicesManager> manager;
++  HRESULT hr = base::win::RoGetActivationFactory(
++      HStringReference(
++          RuntimeClass_Windows_UI_Text_Core_CoreTextServicesManager)
++          .Get(),
++      IID_PPV_ARGS(&statics));
++  if (SUCCEEDED(hr))
++    hr = statics->GetForCurrentView(&manager);
++  if (SUCCEEDED(hr))
++    hr = manager->CreateEditContext(&context_);
++  VLOG(1) << "CoreTextEditContext : " << std::hex << hr;
++  if (FAILED(hr)) {
++    LOG(ERROR) << "CoreTextEditContext : " << std::hex << hr;
++    context_.Reset();
++    return;
++  }
++  // Le clavier est affiché et masqué ici, au gré du champ focalisé.
++  context_->put_InputPaneDisplayPolicy(
++      text_core::CoreTextInputPaneDisplayPolicy_Manual);
++
++  context_->add_TextRequested(
++      Callback<ITypedEventHandler<text_core::CoreTextEditContext*,
++                                  text_core::CoreTextTextRequestedEventArgs*>>(
++          [this](text_core::ICoreTextEditContext*,
++                 text_core::ICoreTextTextRequestedEventArgs* args) {
++            return OnTextRequested(args);
++          })
++          .Get(),
++      &text_requested_token_);
++  context_->add_SelectionRequested(
++      Callback<ITypedEventHandler<
++          text_core::CoreTextEditContext*,
++          text_core::CoreTextSelectionRequestedEventArgs*>>(
++          [this](text_core::ICoreTextEditContext*,
++                 text_core::ICoreTextSelectionRequestedEventArgs* args) {
++            return OnSelectionRequested(args);
++          })
++          .Get(),
++      &selection_requested_token_);
++  context_->add_TextUpdating(
++      Callback<ITypedEventHandler<text_core::CoreTextEditContext*,
++                                  text_core::CoreTextTextUpdatingEventArgs*>>(
++          [this](text_core::ICoreTextEditContext*,
++                 text_core::ICoreTextTextUpdatingEventArgs* args) {
++            return OnTextUpdating(args);
++          })
++          .Get(),
++      &text_updating_token_);
++  context_->add_SelectionUpdating(
++      Callback<ITypedEventHandler<
++          text_core::CoreTextEditContext*,
++          text_core::CoreTextSelectionUpdatingEventArgs*>>(
++          [this](text_core::ICoreTextEditContext*,
++                 text_core::ICoreTextSelectionUpdatingEventArgs* args) {
++            return OnSelectionUpdating(args);
++          })
++          .Get(),
++      &selection_updating_token_);
++  context_->add_FocusRemoved(
++      Callback<ITypedEventHandler<text_core::CoreTextEditContext*,
++                                  IInspectable*>>(
++          [this](text_core::ICoreTextEditContext*, IInspectable*) {
++            context_focused_ = false;
++            return S_OK;
++          })
++          .Get(),
++      &focus_removed_token_);
++
++  ComPtr<IInputPaneStatics> pane_statics;
++  ComPtr<IInputPane> pane;
++  hr = base::win::RoGetActivationFactory(
++      HStringReference(RuntimeClass_Windows_UI_ViewManagement_InputPane).Get(),
++      IID_PPV_ARGS(&pane_statics));
++  if (SUCCEEDED(hr))
++    hr = pane_statics->GetForCurrentView(&pane);
++  if (SUCCEEDED(hr))
++    hr = pane.As(&input_pane_);
++  VLOG(1) << "InputPane : " << std::hex << hr;
++}
++
++void InputMethodUwp::UpdateFocus(bool restart) {
++  if (!context_)
++    return;
++  const bool wants_keyboard =
++      GetTextInputClient() && GetTextInputType() != TEXT_INPUT_TYPE_NONE;
++  VLOG(1) << "Saisie : client " << !!GetTextInputClient() << ", type "
++          << GetTextInputType() << ", focus " << context_focused_;
++  boolean done = false;
++  if (!wants_keyboard) {
++    if (context_focused_) {
++      context_->NotifyFocusLeave();
++      context_focused_ = false;
++      if (input_pane_)
++        input_pane_->TryHide(&done);
++    }
++    return;
++  }
++  if (context_focused_ && !restart)
++    return;
++  if (context_focused_)
++    context_->NotifyFocusLeave();
++  gfx::Range selection;
++  selection_ = GetTextInputClient()->GetEditableSelectionRange(&selection)
++                   ? selection
++                   : gfx::Range(0);
++  context_->put_InputScope(ToInputScope(GetTextInputType()));
++  const HRESULT enter = context_->NotifyFocusEnter();
++  context_focused_ = true;
++  HRESULT show = E_NOINTERFACE;
++  if (input_pane_)
++    show = input_pane_->TryShow(&done);
++  VLOG(1) << "Saisie : champ de type " << GetTextInputType()
++            << ", NotifyFocusEnter " << std::hex << enter << ", TryShow "
++            << show << std::dec << " (" << static_cast<int>(done) << ")";
++}
++
++ui::EventDispatchDetails InputMethodUwp::DispatchKeyEvent(ui::KeyEvent* event) {
++  DCHECK(event->type() == ET_KEY_PRESSED || event->type() == ET_KEY_RELEASED);
++  if (context_focused_) {
++    // L'effacement et Entrée peuvent arriver par la touche et par le texte du
++    // CoreTextEditContext : une seule des deux voies est appliquée.
++    if (event->key_code() == VKEY_BACK) {
++      const base::TimeTicks now = base::TimeTicks::Now();
++      if (event->type() == ET_KEY_PRESSED) {
++        back_key_forwarded_ = now - last_text_delete_ >= kEnterDedup;
++        VLOG(1) << "Saisie : touche d'effacement "
++                  << (back_key_forwarded_ ? "transmise" : "ignorée");
++        if (back_key_forwarded_) {
++          last_key_back_ = now;
++          OnBackKeyForwarded();
++        }
++      }
++      if (!back_key_forwarded_) {
++        event->StopPropagation();
++        return ui::EventDispatchDetails();
++      }
++    }
++    if (event->key_code() == VKEY_RETURN && event->type() == ET_KEY_PRESSED &&
++        !dispatching_text_enter_) {
++      const base::TimeTicks now = base::TimeTicks::Now();
++      if (now - last_text_enter_ < kEnterDedup) {
++        event->StopPropagation();
++        return ui::EventDispatchDetails();
++      }
++      last_key_enter_ = now;
++    }
++  }
++
++  ui::EventDispatchDetails details = DispatchKeyEventPostIME(event);
++  if (!event->stopped_propagation() && !details.dispatcher_destroyed &&
++      event->type() == ET_KEY_PRESSED && GetTextInputClient()) {
++    const uint16_t ch = event->GetCharacter();
++    if (ch) {
++      GetTextInputClient()->InsertChar(*event);
++      event->StopPropagation();
++    }
++  }
++  return details;
++}
++
++void InputMethodUwp::OnBackKeyForwarded() {
++  // Blink efface lui-même : le modèle de texte du système doit suivre.
++  if (!context_)
++    return;
++  gfx::Range removed = selection_;
++  if (removed.is_empty()) {
++    if (removed.start() == 0)
++      return;
++    removed = gfx::Range(removed.start() - 1, removed.start());
++  }
++  const gfx::Range caret(removed.GetMin());
++  context_->NotifyTextChanged(ToCoreRange(removed), 0, ToCoreRange(caret));
++  selection_ = caret;
++}
++
++void InputMethodUwp::DispatchEnter() {  const base::TimeTicks now = base::TimeTicks::Now();
++  if (now - last_key_enter_ < kEnterDedup)
++    return;
++  last_text_enter_ = now;
++  dispatching_text_enter_ = true;
++  KeyEvent press(ET_KEY_PRESSED, VKEY_RETURN, DomCode::ENTER, EF_NONE,
++                 DomKey::ENTER, now);
++  DispatchKeyEvent(&press);
++  KeyEvent release(ET_KEY_RELEASED, VKEY_RETURN, DomCode::ENTER, EF_NONE,
++                   DomKey::ENTER, now);
++  DispatchKeyEvent(&release);
++  dispatching_text_enter_ = false;
++}
++
++void InputMethodUwp::OnTextInputTypeChanged(TextInputClient* client) {
++  InputMethodBase::OnTextInputTypeChanged(client);
++  VLOG(1) << "Saisie : type " << client->GetTextInputType() << ", client "
++            << (IsTextInputClientFocused(client) ? "focalisé" : "non focalisé");
++  if (IsTextInputClientFocused(client))
++    UpdateFocus(/*restart=*/false);
++}
++
++void InputMethodUwp::OnDidChangeFocusedClient(TextInputClient* focused_before,
++                                              TextInputClient* focused) {
++  UpdateFocus(/*restart=*/true);
++}
++
++void InputMethodUwp::OnCaretBoundsChanged(const TextInputClient* client) {
++  NotifyTextInputCaretBoundsChanged(client);
++}
++
++void InputMethodUwp::CancelComposition(const TextInputClient* client) {}
++
++bool InputMethodUwp::IsCandidatePopupOpen() const {
++  return false;
++}
++
++// Pas de messages de fenêtre sous UWP.
++bool InputMethodUwp::OnUntranslatedIMEMessage(const CHROME_MSG event,
++                                              NativeEventResult* result) {
++  return false;
++}
++
++void InputMethodUwp::OnInputLocaleChanged() {}
++
++bool InputMethodUwp::IsInputLocaleCJK() const {
++  return false;
++}
++
++HRESULT InputMethodUwp::OnTextRequested(
++    text_core::ICoreTextTextRequestedEventArgs* args) {
++  ComPtr<text_core::ICoreTextTextRequest> request;
++  if (FAILED(args->get_Request(&request)))
++    return S_OK;
++  text_core::CoreTextRange requested = {};
++  request->get_Range(&requested);
++  std::u16string text;
++  gfx::Range known;
++  TextInputClient* client = GetTextInputClient();
++  if (client && client->GetTextRange(&known)) {
++    gfx::Range range = FromCoreRange(requested).Intersect(known);
++    if (!range.IsValid() || !client->GetTextFromRange(range, &text))
++      text.clear();
++  }
++  base::win::ScopedHString hstring = base::win::ScopedHString::Create(
++      std::wstring(text.begin(), text.end()));
++  request->put_Text(hstring.get());
++  return S_OK;
++}
++
++HRESULT InputMethodUwp::OnSelectionRequested(
++    text_core::ICoreTextSelectionRequestedEventArgs* args) {
++  ComPtr<text_core::ICoreTextSelectionRequest> request;
++  if (SUCCEEDED(args->get_Request(&request)))
++    request->put_Selection(ToCoreRange(selection_));
++  return S_OK;
++}
++
++HRESULT InputMethodUwp::OnTextUpdating(
++    text_core::ICoreTextTextUpdatingEventArgs* args) {
++  text_core::CoreTextRange core_range = {};
++  text_core::CoreTextRange core_selection = {};
++  HSTRING hstring = nullptr;
++  args->get_Range(&core_range);
++  args->get_Text(&hstring);
++  args->get_NewSelection(&core_selection);
++  base::win::ScopedHString scoped(hstring);
++  args->put_Result(text_core::CoreTextTextUpdatingResult_Succeeded);
++
++  TextInputClient* client = GetTextInputClient();
++  if (!client)
++    return S_OK;
++
++  std::wstring wide(scoped.Get());
++  const bool enter = wide.find_first_of(L"\r\n") != std::wstring::npos;
++  std::u16string text;
++  for (wchar_t c : wide) {
++    if (c != L'\r' && c != L'\n')
++      text.push_back(static_cast<char16_t>(c));
++  }
++
++  const gfx::Range range = FromCoreRange(core_range);
++  VLOG(1) << "Saisie : texte [" << range.GetMin() << ", " << range.GetMax()
++            << ") <- " << text.size() << " caractère(s), sélection ["
++            << selection_.GetMin() << ", " << selection_.GetMax() << ")";
++  if (text.empty() && !range.is_empty()) {
++    // Effacement. InsertText ignore un texte vide : on passe par
++    // ExtendSelectionAndDelete, sur le même canal que la sélection.
++    const base::TimeTicks now = base::TimeTicks::Now();
++    if (now - last_key_back_ >= kEnterDedup) {
++      last_text_delete_ = now;
++      if (selection_.is_empty() && range.GetMax() == selection_.start()) {
++        client->ExtendSelectionAndDelete(range.length(), 0);
++      } else {
++        client->SetEditableSelectionRange(range);
++        client->ExtendSelectionAndDelete(0, 0);
++      }
++    }
++  } else if (!text.empty()) {
++    if (range != selection_)
++      client->SetEditableSelectionRange(range);
++    client->InsertText(
++        text, TextInputClient::InsertTextCursorBehavior::kMoveCursorAfterText);
++  }
++  selection_ = FromCoreRange(core_selection);
++  if (enter)
++    DispatchEnter();
++  return S_OK;
++}
++
++HRESULT InputMethodUwp::OnSelectionUpdating(
++    text_core::ICoreTextSelectionUpdatingEventArgs* args) {
++  text_core::CoreTextRange core_selection = {};
++  args->get_Selection(&core_selection);
++  args->put_Result(text_core::CoreTextSelectionUpdatingResult_Succeeded);
++  selection_ = FromCoreRange(core_selection);
++  if (TextInputClient* client = GetTextInputClient())
++    client->SetEditableSelectionRange(selection_);
++  return S_OK;
++}
++
++}  // namespace ui
+diff --git a/ui/base/ime/win/input_method_uwp.h b/ui/base/ime/win/input_method_uwp.h
+new file mode 100644
+index 0000000000..3ac24088bd
+--- /dev/null
++++ b/ui/base/ime/win/input_method_uwp.h
+@@ -0,0 +1,90 @@
++// Copyright 2026 The Rhénium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef UI_BASE_IME_WIN_INPUT_METHOD_UWP_H_
++#define UI_BASE_IME_WIN_INPUT_METHOD_UWP_H_
++
++#include <windows.ui.text.core.h>
++#include <windows.ui.viewmanagement.h>
++#include <wrl/client.h>
++
++#include "base/component_export.h"
++#include "base/time/time.h"
++#include "ui/base/ime/input_method_base.h"
++#include "ui/gfx/range/range.h"
++
++namespace ui {
++
++// Rhénium : méthode de saisie d'une app UWP. Le clavier virtuel de Windows 10
++// Mobile passe par un CoreTextEditContext de la CoreWindow : on lui signale
++// le champ focalisé (le système affiche alors le clavier), il nous envoie les
++// modifications du texte, appliquées au TextInputClient (le champ de Blink).
++// Le modèle de texte du système n'est pas resynchronisé sur les changements
++// faits par la page elle-même ; il repart à chaque changement de focus.
++class COMPONENT_EXPORT(UI_BASE_IME_WIN) InputMethodUwp
++    : public InputMethodBase {
++ public:
++  explicit InputMethodUwp(ImeKeyEventDispatcher* ime_key_event_dispatcher);
++  InputMethodUwp(const InputMethodUwp&) = delete;
++  InputMethodUwp& operator=(const InputMethodUwp&) = delete;
++  ~InputMethodUwp() override;
++
++  // InputMethod:
++  ui::EventDispatchDetails DispatchKeyEvent(ui::KeyEvent* event) override;
++  void OnTextInputTypeChanged(TextInputClient* client) override;
++  void OnCaretBoundsChanged(const TextInputClient* client) override;
++  void CancelComposition(const TextInputClient* client) override;
++  bool IsCandidatePopupOpen() const override;
++  bool OnUntranslatedIMEMessage(const CHROME_MSG event,
++                                NativeEventResult* result) override;
++  void OnInputLocaleChanged() override;
++  bool IsInputLocaleCJK() const override;
++
++ protected:
++  // InputMethodBase:
++  void OnDidChangeFocusedClient(TextInputClient* focused_before,
++                                TextInputClient* focused) override;
++
++ private:
++  void CreateEditContext();
++  void UpdateFocus(bool restart);
++  HRESULT OnTextRequested(
++      ABI::Windows::UI::Text::Core::ICoreTextTextRequestedEventArgs* args);
++  HRESULT OnSelectionRequested(
++      ABI::Windows::UI::Text::Core::ICoreTextSelectionRequestedEventArgs*
++          args);
++  HRESULT OnTextUpdating(
++      ABI::Windows::UI::Text::Core::ICoreTextTextUpdatingEventArgs* args);
++  HRESULT OnSelectionUpdating(
++      ABI::Windows::UI::Text::Core::ICoreTextSelectionUpdatingEventArgs*
++          args);
++  void DispatchEnter();
++  void OnBackKeyForwarded();
++
++  Microsoft::WRL::ComPtr<ABI::Windows::UI::Text::Core::ICoreTextEditContext>
++      context_;
++  Microsoft::WRL::ComPtr<ABI::Windows::UI::ViewManagement::IInputPane2>
++      input_pane_;
++  EventRegistrationToken text_requested_token_ = {};
++  EventRegistrationToken selection_requested_token_ = {};
++  EventRegistrationToken text_updating_token_ = {};
++  EventRegistrationToken selection_updating_token_ = {};
++  EventRegistrationToken focus_removed_token_ = {};
++  bool context_focused_ = false;
++  // Sélection telle que la voit le système, tenue ici : celle de Blink arrive
++  // en différé.
++  gfx::Range selection_;
++  // Entrée peut arriver par le texte (« \r ») et par la touche : une seule.
++  base::TimeTicks last_text_enter_;
++  base::TimeTicks last_key_enter_;
++  bool dispatching_text_enter_ = false;
++  // Même chose pour l'effacement.
++  base::TimeTicks last_text_delete_;
++  base::TimeTicks last_key_back_;
++  bool back_key_forwarded_ = false;
++};
++
++}  // namespace ui
++
++#endif  // UI_BASE_IME_WIN_INPUT_METHOD_UWP_H_
 diff --git a/ui/base/ime/win/tsf_event_router.cc b/ui/base/ime/win/tsf_event_router.cc
 index 7844e5828e..dff95860e5 100644
 --- a/ui/base/ime/win/tsf_event_router.cc
@@ -7774,10 +8382,10 @@ index 0000000000..3999b95e77
 +}
 diff --git a/ui/platform_window/uwp/uwp_window.cc b/ui/platform_window/uwp/uwp_window.cc
 new file mode 100644
-index 0000000000..5f5eeff26c
+index 0000000000..fc2898f19d
 --- /dev/null
 +++ b/ui/platform_window/uwp/uwp_window.cc
-@@ -0,0 +1,178 @@
+@@ -0,0 +1,243 @@
 +// Copyright 2026 The Rhénium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -7786,6 +8394,7 @@ index 0000000000..5f5eeff26c
 +
 +#include <windows.devices.input.h>
 +#include <windows.foundation.h>
++#include <windows.system.h>
 +#include <windows.ui.input.h>
 +#include <wrl/event.h>
 +
@@ -7793,6 +8402,9 @@ index 0000000000..5f5eeff26c
 +#include "base/time/time.h"
 +#include "ui/events/event.h"
 +#include "ui/events/event_constants.h"
++#include "ui/events/keycodes/dom/dom_code.h"
++#include "ui/events/keycodes/dom/dom_key.h"
++#include "ui/events/keycodes/keyboard_codes.h"
 +#include "ui/gfx/win/uwp_core_window.h"
 +#include "ui/platform_window/platform_window_delegate.h"
 +
@@ -7814,6 +8426,42 @@ index 0000000000..5f5eeff26c
 +using Microsoft::WRL::Callback;
 +
 +using PointerHandler = ITypedEventHandler<CoreWindow*, PointerEventArgs*>;
++using ABI::Windows::System::VirtualKey;
++using ABI::Windows::UI::Core::IKeyEventArgs;
++using ABI::Windows::UI::Core::KeyEventArgs;
++using KeyHandler = ITypedEventHandler<CoreWindow*, KeyEventArgs*>;
++
++// Touches transmises telles quelles ; les caractères passent par le
++// CoreTextEditContext (ui/base/ime/win/input_method_uwp.h). Code et DomKey
++// donnés ici : les déduire passerait par la disposition du clavier de user32.
++struct SpecialKey {
++  KeyboardCode key_code;
++  DomCode code;
++  DomKey key;
++};
++
++const SpecialKey* FindSpecialKey(VirtualKey virtual_key) {
++  static const SpecialKey kKeys[] = {
++      {VKEY_RETURN, DomCode::ENTER, DomKey::ENTER},
++      {VKEY_BACK, DomCode::BACKSPACE, DomKey::BACKSPACE},
++      {VKEY_TAB, DomCode::TAB, DomKey::TAB},
++      {VKEY_ESCAPE, DomCode::ESCAPE, DomKey::ESCAPE},
++      {VKEY_LEFT, DomCode::ARROW_LEFT, DomKey::ARROW_LEFT},
++      {VKEY_RIGHT, DomCode::ARROW_RIGHT, DomKey::ARROW_RIGHT},
++      {VKEY_UP, DomCode::ARROW_UP, DomKey::ARROW_UP},
++      {VKEY_DOWN, DomCode::ARROW_DOWN, DomKey::ARROW_DOWN},
++      {VKEY_DELETE, DomCode::DEL, DomKey::DEL},
++      {VKEY_HOME, DomCode::HOME, DomKey::HOME},
++      {VKEY_END, DomCode::END, DomKey::END},
++      {VKEY_PRIOR, DomCode::PAGE_UP, DomKey::PAGE_UP},
++      {VKEY_NEXT, DomCode::PAGE_DOWN, DomKey::PAGE_DOWN},
++  };
++  for (const SpecialKey& key : kKeys) {
++    if (static_cast<int>(key.key_code) == static_cast<int>(virtual_key))
++      return &key;
++  }
++  return nullptr;
++}
 +
 +}  // namespace
 +
@@ -7840,6 +8488,8 @@ index 0000000000..5f5eeff26c
 +  core_window_->remove_PointerMoved(moved_token_);
 +  core_window_->remove_PointerReleased(released_token_);
 +  core_window_->remove_PointerCaptureLost(capture_lost_token_);
++  core_window_->remove_KeyDown(key_down_token_);
++  core_window_->remove_KeyUp(key_up_token_);
 +}
 +
 +void UwpWindow::SetBoundsInPixels(const gfx::Rect& bounds) {
@@ -7884,6 +8534,29 @@ index 0000000000..5f5eeff26c
 +        return S_OK;
 +      }).Get(),
 +      &capture_lost_token_);
++  core_window_->add_KeyDown(
++      Callback<KeyHandler>([this](ICoreWindow*, IKeyEventArgs* args) {
++        return OnKey(ET_KEY_PRESSED, args);
++      }).Get(),
++      &key_down_token_);
++  core_window_->add_KeyUp(
++      Callback<KeyHandler>([this](ICoreWindow*, IKeyEventArgs* args) {
++        return OnKey(ET_KEY_RELEASED, args);
++      }).Get(),
++      &key_up_token_);
++}
++
++HRESULT UwpWindow::OnKey(EventType type, IKeyEventArgs* args) {
++  VirtualKey virtual_key = {};
++  if (FAILED(args->get_VirtualKey(&virtual_key)))
++    return S_OK;
++  const SpecialKey* key = FindSpecialKey(virtual_key);
++  if (!key)
++    return S_OK;
++  KeyEvent event(type, key->key_code, key->code, EF_NONE, key->key,
++                 base::TimeTicks::Now());
++  delegate()->DispatchEvent(&event);
++  return S_OK;
 +}
 +
 +HRESULT UwpWindow::OnPointer(EventType touch_type, IPointerEventArgs* args) {
@@ -7958,10 +8631,10 @@ index 0000000000..5f5eeff26c
 +}  // namespace ui
 diff --git a/ui/platform_window/uwp/uwp_window.h b/ui/platform_window/uwp/uwp_window.h
 new file mode 100644
-index 0000000000..13d13857a5
+index 0000000000..39b69dc008
 --- /dev/null
 +++ b/ui/platform_window/uwp/uwp_window.h
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,64 @@
 +// Copyright 2026 The Rhénium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -8005,6 +8678,7 @@ index 0000000000..13d13857a5
 +  HRESULT OnPointer(EventType touch_type,
 +                    ABI::Windows::UI::Core::IPointerEventArgs* args);
 +  void CancelTouches();
++  HRESULT OnKey(EventType type, ABI::Windows::UI::Core::IKeyEventArgs* args);
 +
 +  gfx::Rect bounds_;
 +  float scale_ = 1.0f;
@@ -8013,6 +8687,8 @@ index 0000000000..13d13857a5
 +  EventRegistrationToken moved_token_ = {};
 +  EventRegistrationToken released_token_ = {};
 +  EventRegistrationToken capture_lost_token_ = {};
++  EventRegistrationToken key_down_token_ = {};
++  EventRegistrationToken key_up_token_ = {};
 +  base::flat_set<uint32_t> active_touches_;
 +  // Les identifiants de pointeur de Windows (648…) deviennent des numéros de
 +  // toucher de 0 à 31, la limite de Chromium.
