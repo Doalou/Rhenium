@@ -87,6 +87,11 @@ void BuildCommandLine() {
   // la fenêtre de content_shell.
   command_line->AppendSwitch("single-process");
   command_line->AppendSwitch("no-sandbox");
+  // Téléphone : meta viewport, agent utilisateur « Mobile », barres de
+  // défilement superposées.
+  command_line->AppendSwitch("enable-viewport");
+  command_line->AppendSwitch("use-mobile-user-agent");
+  command_line->AppendSwitchASCII("enable-features", "OverlayScrollbar");
   gfx::Size pixel_size;
   float scale = 1.0f;
   if (gfx::uwp::GetCoreWindowMetrics(&pixel_size, &scale)) {

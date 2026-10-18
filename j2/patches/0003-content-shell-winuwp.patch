@@ -477,10 +477,10 @@ index 0bc450ca4f..e46d495f21 100644
  #elif BUILDFLAG(IS_APPLE)
 diff --git a/components/viz/service/display_embedder/software_output_device_uwp.cc b/components/viz/service/display_embedder/software_output_device_uwp.cc
 new file mode 100644
-index 0000000000..b3ef8194d1
+index 0000000000..fc53d29dea
 --- /dev/null
 +++ b/components/viz/service/display_embedder/software_output_device_uwp.cc
-@@ -0,0 +1,116 @@
+@@ -0,0 +1,138 @@
 +// Copyright 2026 The Rhénium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -538,6 +538,7 @@ index 0000000000..b3ef8194d1
 +      return false;
 +    }
 +    swap_chain_size_ = viewport_pixel_size_;
++    fresh_buffers_ = 2;
 +    return true;
 +  }
 +
@@ -570,6 +571,7 @@ index 0000000000..b3ef8194d1
 +    return false;
 +  }
 +  swap_chain_size_ = viewport_pixel_size_;
++  fresh_buffers_ = 2;
 +  LOG(INFO) << "Swap chain de la CoreWindow : "
 +            << viewport_pixel_size_.ToString();
 +  return true;
@@ -581,13 +583,33 @@ index 0000000000..b3ef8194d1
 +  if (!surface_ || !surface_->peekPixels(&pixmap) || !EnsureSwapChain())
 +    return;
 +
-+  // Modèle flip : le tampon arrière ne garde pas l'image précédente, on copie
-+  // donc toute l'image et pas seulement la zone redessinée.
++  // Modèle flip à deux tampons : le tampon arrière contient l'image d'il y a
++  // deux présentations. On recopie la zone redessinée de cette image et de la
++  // précédente ; toute l'image tant que les deux tampons n'ont pas été remplis.
++  const gfx::Rect full(viewport_pixel_size_);
++  gfx::Rect copy = damage_rect_;
++  copy.Union(previous_damage_);
++  if (fresh_buffers_ > 0) {
++    copy = full;
++    --fresh_buffers_;
++  }
++  copy.Intersect(full);
++  previous_damage_ = damage_rect_;
++
 +  ComPtr<ID3D11Texture2D> back_buffer;
 +  if (FAILED(swap_chain_->GetBuffer(0, IID_PPV_ARGS(&back_buffer))))
 +    return;
-+  context_->UpdateSubresource(back_buffer.Get(), 0, nullptr, pixmap.addr(),
-+                              static_cast<UINT>(pixmap.rowBytes()), 0);
++  if (!copy.IsEmpty()) {
++    const D3D11_BOX box = {static_cast<UINT>(copy.x()),
++                           static_cast<UINT>(copy.y()),
++                           0,
++                           static_cast<UINT>(copy.right()),
++                           static_cast<UINT>(copy.bottom()),
++                           1};
++    context_->UpdateSubresource(back_buffer.Get(), 0, &box,
++                                pixmap.addr32(copy.x(), copy.y()),
++                                static_cast<UINT>(pixmap.rowBytes()), 0);
++  }
 +  HRESULT hr = swap_chain_->Present(1, 0);
 +  if (FAILED(hr)) {
 +    LOG(ERROR) << "Present : " << std::hex << hr;
@@ -599,10 +621,10 @@ index 0000000000..b3ef8194d1
 +}  // namespace viz
 diff --git a/components/viz/service/display_embedder/software_output_device_uwp.h b/components/viz/service/display_embedder/software_output_device_uwp.h
 new file mode 100644
-index 0000000000..c93281e550
+index 0000000000..fb91b13541
 --- /dev/null
 +++ b/components/viz/service/display_embedder/software_output_device_uwp.h
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,46 @@
 +// Copyright 2026 The Rhénium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -640,6 +662,8 @@ index 0000000000..c93281e550
 +  Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
 +  Microsoft::WRL::ComPtr<IDXGISwapChain1> swap_chain_;
 +  gfx::Size swap_chain_size_;
++  gfx::Rect previous_damage_;
++  int fresh_buffers_ = 0;  // présentations encore à faire en entier
 +  bool failed_ = false;
 +  int frames_ = 0;
 +};
@@ -7725,10 +7749,10 @@ index bea950fb34..bd2f349d13 100644
      }
 diff --git a/ui/platform_window/uwp/BUILD.gn b/ui/platform_window/uwp/BUILD.gn
 new file mode 100644
-index 0000000000..77a679c1d8
+index 0000000000..3999b95e77
 --- /dev/null
 +++ b/ui/platform_window/uwp/BUILD.gn
-@@ -0,0 +1,18 @@
+@@ -0,0 +1,19 @@
 +# Copyright 2026 The Rhénium Authors
 +# Use of this source code is governed by a BSD-style license that can be
 +# found in the LICENSE file.
@@ -7741,6 +7765,7 @@ index 0000000000..77a679c1d8
 +  ]
 +  deps = [
 +    "//base",
++    "//ui/events",
 +    "//ui/gfx",
 +    "//ui/gfx/geometry",
 +    "//ui/platform_window",
@@ -7749,31 +7774,58 @@ index 0000000000..77a679c1d8
 +}
 diff --git a/ui/platform_window/uwp/uwp_window.cc b/ui/platform_window/uwp/uwp_window.cc
 new file mode 100644
-index 0000000000..fef1bc3d5c
+index 0000000000..5f5eeff26c
 --- /dev/null
 +++ b/ui/platform_window/uwp/uwp_window.cc
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,178 @@
 +// Copyright 2026 The Rhénium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
 +#include "ui/platform_window/uwp/uwp_window.h"
 +
++#include <windows.devices.input.h>
++#include <windows.foundation.h>
++#include <windows.ui.input.h>
++#include <wrl/event.h>
++
 +#include "base/logging.h"
++#include "base/time/time.h"
++#include "ui/events/event.h"
++#include "ui/events/event_constants.h"
 +#include "ui/gfx/win/uwp_core_window.h"
 +#include "ui/platform_window/platform_window_delegate.h"
 +
 +namespace ui {
 +
++namespace {
++
++using ABI::Windows::Devices::Input::IPointerDevice;
++using ABI::Windows::Devices::Input::PointerDeviceType;
++using ABI::Windows::Devices::Input::PointerDeviceType_Mouse;
++using ABI::Windows::Devices::Input::PointerDeviceType_Touch;
++using ABI::Windows::Foundation::ITypedEventHandler;
++using ABI::Windows::Foundation::Point;
++using ABI::Windows::UI::Core::CoreWindow;
++using ABI::Windows::UI::Core::ICoreWindow;
++using ABI::Windows::UI::Core::IPointerEventArgs;
++using ABI::Windows::UI::Core::PointerEventArgs;
++using ABI::Windows::UI::Input::IPointerPoint;
++using Microsoft::WRL::Callback;
++
++using PointerHandler = ITypedEventHandler<CoreWindow*, PointerEventArgs*>;
++
++}  // namespace
++
 +UwpWindow::UwpWindow(PlatformWindowDelegate* delegate)
 +    : StubWindow(delegate, /*use_default_accelerated_widget=*/false) {
 +  gfx::Size pixel_size;
-+  float scale = 1.0f;
-+  if (!gfx::uwp::GetCoreWindowMetrics(&pixel_size, &scale))
++  if (!gfx::uwp::GetCoreWindowMetrics(&pixel_size, &scale_))
 +    LOG(ERROR) << "UwpWindow : pas de CoreWindow sur ce thread";
 +  bounds_ = gfx::Rect(pixel_size);
 +  LOG(INFO) << "UwpWindow : " << pixel_size.ToString() << " pixels, échelle "
-+            << scale;
++            << scale_;
++  SubscribePointerEvents();
 +  // Le widget n'est jamais traité comme un HWND par la sortie UWP du
 +  // compositeur ; il doit seulement être non nul.
 +  delegate->OnAcceleratedWidgetAvailable(
@@ -7781,7 +7833,14 @@ index 0000000000..fef1bc3d5c
 +          gfx::uwp::GetCoreWindow().Get()));
 +}
 +
-+UwpWindow::~UwpWindow() = default;
++UwpWindow::~UwpWindow() {
++  if (!core_window_)
++    return;
++  core_window_->remove_PointerPressed(pressed_token_);
++  core_window_->remove_PointerMoved(moved_token_);
++  core_window_->remove_PointerReleased(released_token_);
++  core_window_->remove_PointerCaptureLost(capture_lost_token_);
++}
 +
 +void UwpWindow::SetBoundsInPixels(const gfx::Rect& bounds) {
 +  bounds_ = gfx::Rect(bounds_.size());
@@ -7800,13 +7859,109 @@ index 0000000000..fef1bc3d5c
 +  return const_cast<UwpWindow*>(this)->delegate()->ConvertRectToDIP(bounds_);
 +}
 +
++void UwpWindow::SubscribePointerEvents() {
++  Microsoft::WRL::ComPtr<IUnknown> window = gfx::uwp::GetCoreWindow();
++  if (!window || FAILED(window.As(&core_window_)))
++    return;
++  core_window_->add_PointerPressed(
++      Callback<PointerHandler>([this](ICoreWindow*, IPointerEventArgs* args) {
++        return OnPointer(ET_TOUCH_PRESSED, args);
++      }).Get(),
++      &pressed_token_);
++  core_window_->add_PointerMoved(
++      Callback<PointerHandler>([this](ICoreWindow*, IPointerEventArgs* args) {
++        return OnPointer(ET_TOUCH_MOVED, args);
++      }).Get(),
++      &moved_token_);
++  core_window_->add_PointerReleased(
++      Callback<PointerHandler>([this](ICoreWindow*, IPointerEventArgs* args) {
++        return OnPointer(ET_TOUCH_RELEASED, args);
++      }).Get(),
++      &released_token_);
++  core_window_->add_PointerCaptureLost(
++      Callback<PointerHandler>([this](ICoreWindow*, IPointerEventArgs*) {
++        CancelTouches();
++        return S_OK;
++      }).Get(),
++      &capture_lost_token_);
++}
++
++HRESULT UwpWindow::OnPointer(EventType touch_type, IPointerEventArgs* args) {
++  Microsoft::WRL::ComPtr<IPointerPoint> point;
++  if (FAILED(args->get_CurrentPoint(&point)))
++    return S_OK;
++  Point position = {};
++  UINT32 id = 0;
++  point->get_Position(&position);
++  point->get_PointerId(&id);
++  PointerDeviceType device_type = PointerDeviceType_Touch;
++  Microsoft::WRL::ComPtr<IPointerDevice> device;
++  if (SUCCEEDED(point->get_PointerDevice(&device)) && device)
++    device->get_PointerDeviceType(&device_type);
++
++  // Position en DIP dans la CoreWindow ; Aura attend des pixels.
++  const gfx::PointF location(position.X * scale_, position.Y * scale_);
++  const base::TimeTicks now = base::TimeTicks::Now();
++
++  if (device_type == PointerDeviceType_Mouse) {
++    EventType type = ET_MOUSE_MOVED;
++    int changed = 0;
++    if (touch_type == ET_TOUCH_PRESSED) {
++      type = ET_MOUSE_PRESSED;
++      changed = EF_LEFT_MOUSE_BUTTON;
++      mouse_pressed_ = true;
++    } else if (touch_type == ET_TOUCH_RELEASED) {
++      type = ET_MOUSE_RELEASED;
++      changed = EF_LEFT_MOUSE_BUTTON;
++      mouse_pressed_ = false;
++    } else if (mouse_pressed_) {
++      type = ET_MOUSE_DRAGGED;
++    }
++    const int flags =
++        (mouse_pressed_ || changed) ? EF_LEFT_MOUSE_BUTTON : EF_NONE;
++    MouseEvent event(type, location, location, now, flags, changed);
++    delegate()->DispatchEvent(&event);
++    return S_OK;
++  }
++
++  // Toucher et stylet. Un déplacement sans appui (survol du stylet) est
++  // ignoré.
++  if (touch_type == ET_TOUCH_PRESSED) {
++    active_touches_.insert(id);
++  } else if (!active_touches_.contains(id)) {
++    return S_OK;
++  }
++  const auto touch_id = static_cast<PointerId>(touch_ids_.GetGeneratedID(id));
++  if (touch_type == ET_TOUCH_RELEASED) {
++    active_touches_.erase(id);
++    touch_ids_.ReleaseNumber(id);
++  }
++  TouchEvent event(touch_type, location, location, now,
++                   PointerDetails(EventPointerType::kTouch, touch_id));
++  delegate()->DispatchEvent(&event);
++  return S_OK;
++}
++
++void UwpWindow::CancelTouches() {
++  const base::TimeTicks now = base::TimeTicks::Now();
++  for (uint32_t id : active_touches_) {
++    const auto touch_id = static_cast<PointerId>(touch_ids_.GetGeneratedID(id));
++    touch_ids_.ReleaseNumber(id);
++    TouchEvent event(ET_TOUCH_CANCELLED, gfx::PointF(), gfx::PointF(), now,
++                     PointerDetails(EventPointerType::kTouch, touch_id));
++    delegate()->DispatchEvent(&event);
++  }
++  active_touches_.clear();
++  mouse_pressed_ = false;
++}
++
 +}  // namespace ui
 diff --git a/ui/platform_window/uwp/uwp_window.h b/ui/platform_window/uwp/uwp_window.h
 new file mode 100644
-index 0000000000..a429a9f510
+index 0000000000..13d13857a5
 --- /dev/null
 +++ b/ui/platform_window/uwp/uwp_window.h
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,61 @@
 +// Copyright 2026 The Rhénium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -7814,7 +7969,13 @@ index 0000000000..a429a9f510
 +#ifndef UI_PLATFORM_WINDOW_UWP_UWP_WINDOW_H_
 +#define UI_PLATFORM_WINDOW_UWP_UWP_WINDOW_H_
 +
++#include <windows.ui.core.h>
++#include <wrl/client.h>
++
++#include "base/containers/flat_set.h"
++#include "ui/events/types/event_type.h"
 +#include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/sequential_id_generator.h"
 +#include "ui/platform_window/stub/stub_window.h"
 +
 +namespace ui {
@@ -7823,8 +7984,9 @@ index 0000000000..a429a9f510
 +// CoreWindow du thread UI, quelle que soit la taille demandée, et la donne au
 +// compositeur comme widget (voir ui/gfx/win/uwp_core_window.h et
 +// components/viz/service/display_embedder/software_output_device_uwp.h).
-+// Titre, curseur, capture et activation restent ceux de StubWindow ; entrées
-+// et changements de taille : plus tard.
++// Les pointeurs de la CoreWindow deviennent des événements tactiles (toucher,
++// stylet) ou souris. Titre, curseur, capture et activation restent ceux de
++// StubWindow ; changements de taille : plus tard.
 +class UwpWindow : public StubWindow {
 + public:
 +  explicit UwpWindow(PlatformWindowDelegate* delegate);
@@ -7839,7 +8001,23 @@ index 0000000000..a429a9f510
 +  void SetBoundsInDIP(const gfx::Rect& bounds) override;
 +  gfx::Rect GetBoundsInDIP() const override;
 +
++  void SubscribePointerEvents();
++  HRESULT OnPointer(EventType touch_type,
++                    ABI::Windows::UI::Core::IPointerEventArgs* args);
++  void CancelTouches();
++
 +  gfx::Rect bounds_;
++  float scale_ = 1.0f;
++  Microsoft::WRL::ComPtr<ABI::Windows::UI::Core::ICoreWindow> core_window_;
++  EventRegistrationToken pressed_token_ = {};
++  EventRegistrationToken moved_token_ = {};
++  EventRegistrationToken released_token_ = {};
++  EventRegistrationToken capture_lost_token_ = {};
++  base::flat_set<uint32_t> active_touches_;
++  // Les identifiants de pointeur de Windows (648…) deviennent des numéros de
++  // toucher de 0 à 31, la limite de Chromium.
++  SequentialIDGenerator touch_ids_{0};
++  bool mouse_pressed_ = false;
 +};
 +
 +}  // namespace ui
