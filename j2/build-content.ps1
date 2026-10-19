@@ -20,8 +20,14 @@ $extraArgs = @(
   'enable_ppapi = false'
   'enable_printing = false'
   'enable_pdf = false'
+  # Vidéo VP8/VP9 par libvpx (C pur), audio AAC par Media Foundation ; pas de FFmpeg.
   'media_use_ffmpeg = false'
-  'media_use_libvpx = false'
+  'media_use_libvpx = true'
+  'proprietary_codecs = true'  # MP4 et AAC des flux MSE (YouTube)
+  'media_use_openh264 = false'  # encodeur H.264 (absent de l'arbre)
+  'enable_hevc_parser_and_hw_decoder = false'
+  'enable_platform_dolby_vision = false'
+  'enable_platform_encrypted_dolby_vision = false'
   'enable_dav1d_decoder = false'
   'enable_library_cdms = true'  # défaut : toolkit_views ; media/cdm en dépend sous Windows
   'enable_swiftshader = false'

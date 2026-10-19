@@ -75,6 +75,7 @@ struct ShellState {
   Button back{nullptr};
   Button reload{nullptr};
   FontIcon reload_icon{nullptr};
+  ContentControl focus_sink{nullptr};  // garde le focus XAML pendant la page
   ProgressBar progress{nullptr};
   CoreDispatcher dispatcher{nullptr};
   RheniumHost host{};
@@ -139,7 +140,8 @@ void ShowAddress() {
 
 // Rend le clavier à la page : la barre d'adresse perd le focus XAML.
 void FocusWeb() {
-  g_shell->reload.Focus(FocusState::Programmatic);
+  // Pas sur un bouton : Entrée tapé dans la page le déclencherait.
+  g_shell->focus_sink.Focus(FocusState::Programmatic);
   RheniumEngineSetWebFocus(1);
 }
 
@@ -416,9 +418,21 @@ UIElement BuildUi() {
   bar_row.Height(GridLength{1, GridUnitType::Auto});
   layout.RowDefinitions().Append(content_row);
   layout.RowDefinitions().Append(bar_row);
+  shell.focus_sink = ContentControl();
+  shell.focus_sink.IsTabStop(true);
+  shell.focus_sink.UseSystemFocusVisuals(false);
+  shell.focus_sink.IsHitTestVisible(false);
+  shell.focus_sink.Width(1);
+  shell.focus_sink.Height(1);
+  shell.focus_sink.Opacity(0);
+  shell.focus_sink.HorizontalAlignment(HorizontalAlignment::Left);
+  shell.focus_sink.VerticalAlignment(VerticalAlignment::Top);
+
+  Grid::SetRow(shell.focus_sink, 0);
   Grid::SetRow(shell.panel, 0);
   Grid::SetRow(shell.input_surface, 0);
   Grid::SetRow(bar, 1);
+  layout.Children().Append(shell.focus_sink);
   layout.Children().Append(shell.panel);
   layout.Children().Append(shell.input_surface);
   layout.Children().Append(bar);

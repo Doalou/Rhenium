@@ -1192,6 +1192,34 @@ index 3da3cc7816..f9a40596ba 100644
    friend class MessagePumpForUI;
  #endif
  
+diff --git a/base/sync_socket_win.cc b/base/sync_socket_win.cc
+index 187cd9225a..9cb54c6ac5 100644
+--- a/base/sync_socket_win.cc
++++ b/base/sync_socket_win.cc
+@@ -21,7 +21,13 @@ namespace {
+ // IMPORTANT: do not change how this name is generated because it will break
+ // in sandboxed scenarios as we might have by-name policies that allow pipe
+ // creation. Also keep the secure random number generation.
++#if defined(WINUWP)
++// Rhénium : une app UWP ne peut créer de tube nommé que sous pipe\LOCAL.
++const wchar_t kPipeNameFormat[] =
++    L"\\\\.\\pipe\\LOCAL\\chrome.sync.%u.%u.%lu";
++#else
+ const wchar_t kPipeNameFormat[] = L"\\\\.\\pipe\\chrome.sync.%u.%u.%lu";
++#endif
+ const size_t kPipePathMax = std::size(kPipeNameFormat) + (3 * 10) + 1;
+ 
+ // To avoid users sending negative message lengths to Send/Receive
+@@ -67,6 +73,9 @@ bool CreatePairImpl(ScopedHandle* socket_a,
+   } while (!handle_a.is_valid() && (GetLastError() == ERROR_PIPE_BUSY));
+ 
+   if (!handle_a.is_valid()) {
++#if defined(WINUWP)
++    PLOG(ERROR) << "CreateNamedPipeW " << name;
++#endif
+     NOTREACHED();
+     return false;
+   }
 diff --git a/base/task/sequence_manager/sequence_manager_impl.cc b/base/task/sequence_manager/sequence_manager_impl.cc
 index 1306b2047c..8422532d55 100644
 --- a/base/task/sequence_manager/sequence_manager_impl.cc

@@ -1553,6 +1553,39 @@ index cb3f192994..d1aaffc2ed 100644
    }
    return "Unknown";
  }
+diff --git a/media/base/supported_types.cc b/media/base/supported_types.cc
+index 07b991932a..08a5d34096 100644
+--- a/media/base/supported_types.cc
++++ b/media/base/supported_types.cc
+@@ -330,6 +330,16 @@ bool IsDefaultSupportedVideoType(const VideoType& type) {
+   if (!IsSupportedHdrMetadata(type.hdr_metadata_type))
+     return false;
+ 
++#if defined(WINUWP)
++  // Rhénium : seuls VP8 et VP9 ont un décodeur (libvpx, sans FFmpeg). Les
++  // annoncer seuls fait choisir aux sites (YouTube) un flux décodable.
++  if (type.codec == VideoCodec::kVP8)
++    return true;
++  if (type.codec == VideoCodec::kVP9)
++    return IsVp9ProfileSupported(type);
++  return false;
++#endif
++
+ #if !BUILDFLAG(USE_PROPRIETARY_CODECS)
+   if (IsVideoCodecProprietary(type.codec))
+     return false;
+@@ -360,6 +370,11 @@ bool IsDefaultSupportedAudioType(const AudioType& type) {
+   if (type.spatial_rendering)
+     return false;
+ 
++#if defined(WINUWP)
++  // Rhénium : sans FFmpeg, seul AAC a un décodeur (Media Foundation).
++  return type.codec == AudioCodec::kAAC && IsAACSupported(type);
++#endif
++
+ #if !BUILDFLAG(USE_PROPRIETARY_CODECS)
+   if (IsAudioCodecProprietary(type.codec))
+     return false;
 diff --git a/media/base/win/BUILD.gn b/media/base/win/BUILD.gn
 index f81be11e7d..28744fb910 100644
 --- a/media/base/win/BUILD.gn
@@ -1586,6 +1619,24 @@ index 86da88fe13..57fc5a64d6 100644
  #include <wrl/client.h>
  
  #include "base/logging.h"
+diff --git a/media/base/win/mf_initializer.cc b/media/base/win/mf_initializer.cc
+index fb94328610..5bb523c121 100644
+--- a/media/base/win/mf_initializer.cc
++++ b/media/base/win/mf_initializer.cc
+@@ -24,7 +24,13 @@ static const char kMediaFoundationLoadFailedMessage[] =
+ // sandbox initialization or it will always fail.
+ bool LoadMediaFoundationLibraries() {
+   static const bool kDidLoadSucceed = []() {
++#if defined(WINUWP)
++    // Rhénium : mf.dll (pipeline de lecture) n'est pas utilisé et peut
++    // manquer sur Windows 10 Mobile ; les MFT ne demandent que mfplat.dll.
++    for (const wchar_t* mfdll : {L"mfplat.dll"}) {
++#else
+     for (const wchar_t* mfdll : {L"mf.dll", L"mfplat.dll"}) {
++#endif
+       if (!::LoadLibrary(mfdll)) {
+         LOG(ERROR) << kMediaFoundationLoadFailedMessage << "Could not load "
+                    << mfdll << ". "
 diff --git a/media/capture/BUILD.gn b/media/capture/BUILD.gn
 index 534cd43f8e..44643a26be 100644
 --- a/media/capture/BUILD.gn
@@ -1689,6 +1740,115 @@ index d111319020..66165ececb 100644
  #include "media/capture/video/win/metrics.h"
  #include "third_party/abseil-cpp/absl/types/optional.h"
  
+diff --git a/media/filters/win/media_foundation_audio_decoder.cc b/media/filters/win/media_foundation_audio_decoder.cc
+index 646035b706..46d55f3020 100644
+--- a/media/filters/win/media_foundation_audio_decoder.cc
++++ b/media/filters/win/media_foundation_audio_decoder.cc
+@@ -88,18 +88,26 @@ absl::optional<MFT_REGISTER_TYPE_INFO> GetTypeInfo(
+ #endif
+ #if BUILDFLAG(USE_PROPRIETARY_CODECS)
+     case AudioCodec::kAAC:
++#if defined(WINUWP)
++      // Rhénium : sans FFmpeg, tout l'AAC passe par le décodeur du système.
++      return MFT_REGISTER_TYPE_INFO{MFMediaType_Audio, MFAudioFormat_AAC};
++#else
+       if (config.profile() == AudioCodecProfile::kXHE_AAC &&
+           base::win::GetVersion() >= base::win::Version::WIN11_22H2) {
+         return MFT_REGISTER_TYPE_INFO{MFMediaType_Audio, MFAudioFormat_AAC};
+       }
+       [[fallthrough]];
++#endif
+ #endif
+     default:
+       return absl::nullopt;
+   }
+ }
+ 
+-bool PopulateInputSample(IMFSample* sample, const DecoderBuffer& input) {
++bool PopulateInputSample(IMFSample* sample,
++                         const uint8_t* data,
++                         size_t data_size,
++                         base::TimeDelta timestamp) {
+   Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
+   HRESULT hr = sample->GetBufferByIndex(0, &buffer);
+   RETURN_ON_HR_FAILURE(hr, "Failed to get buffer from sample", false);
+@@ -111,18 +119,18 @@ bool PopulateInputSample(IMFSample* sample, const DecoderBuffer& input) {
+   RETURN_ON_HR_FAILURE(hr, "Failed to lock buffer", false);
+ 
+   RETURN_ON_FAILURE(!current_length, "Input length is zero", false);
+-  RETURN_ON_FAILURE(input.data_size() <= max_length, "Input length is too long",
++  RETURN_ON_FAILURE(data_size <= max_length, "Input length is too long",
+                     false);
+-  memcpy(destination, input.data(), input.data_size());
++  memcpy(destination, data, data_size);
+ 
+-  hr = buffer->SetCurrentLength(input.data_size());
++  hr = buffer->SetCurrentLength(data_size);
+   RETURN_ON_HR_FAILURE(hr, "Failed to set buffer length", false);
+ 
+   hr = buffer->Unlock();
+   RETURN_ON_HR_FAILURE(hr, "Failed to unlock buffer", false);
+ 
+   RETURN_ON_HR_FAILURE(
+-      sample->SetSampleTime(input.timestamp().InNanoseconds() / 100),
++      sample->SetSampleTime(timestamp.InNanoseconds() / 100),
+       "Failed to set input timestamp", false);
+   return true;
+ }
+@@ -228,13 +236,27 @@ void MediaFoundationAudioDecoder::Decode(scoped_refptr<DecoderBuffer> buffer,
+     has_reset_ = false;
+   }
+ 
+-  auto sample = CreateEmptySampleWithBuffer(buffer->data_size(), 0);
++  const uint8_t* data = buffer->data();
++  size_t data_size = buffer->data_size();
++#if defined(WINUWP)
++  // Rhénium : le lecteur MP4 met un en-tête ADTS devant chaque trame AAC ; le
++  // décodeur du système attend de l'AAC brut (wPayloadType = 0).
++  if (config_.codec() == AudioCodec::kAAC && data_size > 9 &&
++      data[0] == 0xFF && (data[1] & 0xF6) == 0xF0) {
++    const size_t header = (data[1] & 1) ? 7 : 9;
++    data += header;
++    data_size -= header;
++  }
++#endif
++
++  auto sample = CreateEmptySampleWithBuffer(data_size, 0);
+   if (!sample) {
+     std::move(decode_cb_bound).Run(DecoderStatus::Codes::kFailed);
+     return;
+   }
+ 
+-  if (!PopulateInputSample(sample.Get(), *buffer)) {
++  if (!PopulateInputSample(sample.Get(), data, data_size,
++                           buffer->timestamp())) {
+     std::move(decode_cb_bound).Run(DecoderStatus::Codes::kFailed);
+     return;
+   }
+@@ -310,6 +332,12 @@ bool MediaFoundationAudioDecoder::CreateDecoder() {
+     return false;
+   }
+ 
++#if defined(WINUWP)
++  // Rhénium : créé sur le thread média du moteur de rendu, sans COM. Laissé
++  // initialisé pour la vie du thread.
++  ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
++#endif
++
+   // Find the decoder factory.
+   //
+   // Note: It'd be nice if there was an asynchronous MFT (to avoid the need
+@@ -321,6 +349,10 @@ bool MediaFoundationAudioDecoder::CreateDecoder() {
+                 MFT_ENUM_FLAG_SORTANDFILTER,
+             &type_info.value(), nullptr, &acts, &acts_num);
+   if (acts_num < 1) {
++#if defined(WINUWP)
++    LOG(ERROR) << "Media Foundation : aucun décodeur pour "
++               << GetCodecName(config_.codec());
++#endif
+     return false;
+   }
+ 
 diff --git a/media/formats/hls/tag_name.cc b/media/formats/hls/tag_name.cc
 index ab2a683fe8..cceae3e0f4 100644
 --- a/media/formats/hls/tag_name.cc
@@ -1771,6 +1931,35 @@ index 4b2844a61d..12109e9957 100644
    } else if (config.codec() == VideoCodec::kHEVC) {
  #if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
      DCHECK(base::FeatureList::IsEnabled(kPlatformHEVCDecoderSupport));
+diff --git a/media/renderers/default_decoder_factory.cc b/media/renderers/default_decoder_factory.cc
+index 55566b9d6a..1652b1cb24 100644
+--- a/media/renderers/default_decoder_factory.cc
++++ b/media/renderers/default_decoder_factory.cc
+@@ -42,6 +42,10 @@
+ #include "media/filters/vpx_video_decoder.h"
+ #endif
+ 
++#if defined(WINUWP)
++#include "media/filters/win/media_foundation_audio_decoder.h"
++#endif
++
+ namespace media {
+ 
+ DefaultDecoderFactory::DefaultDecoderFactory(
+@@ -77,6 +81,13 @@ void DefaultDecoderFactory::CreateAudioDecoders(
+       std::make_unique<FFmpegAudioDecoder>(task_runner, media_log));
+ #endif
+ 
++#if defined(WINUWP)
++  // Rhénium : AAC par le décodeur Media Foundation du système, dans le
++  // moteur de rendu (pas de processus GPU ni de FFmpeg).
++  if (auto decoder = MediaFoundationAudioDecoder::Create())
++    audio_decoders->push_back(std::move(decoder));
++#endif
++
+   if (external_decoder_factory_) {
+     external_decoder_factory_->CreateAudioDecoders(task_runner, media_log,
+                                                    audio_decoders);
 diff --git a/mojo/public/tools/bindings/generators/mojom_ts_generator.py b/mojo/public/tools/bindings/generators/mojom_ts_generator.py
 index d8e0cf3048..908af35fd1 100644
 --- a/mojo/public/tools/bindings/generators/mojom_ts_generator.py

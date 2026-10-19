@@ -40,11 +40,20 @@ Suite de J2 (`..\j2`, content_shell M116 qui affiche Wikipédia sur le Lumia). L
 - Agent utilisateur : celui, réduit, de Chrome 116 pour Android, mobile, et des indices client cohérents (plateforme Android) ; avec « Windows NT 10.0 », les sites servaient leur version bureau. `Accept-Language` : langue du téléphone d'abord.
 - YouTube : en single-process, `MediaDevicesManager` abonnait le service audio intégré aux changements de périphériques, ce qu'il refuse (`DCHECK` dans `audio::Service::BindDeviceNotifier`) ; l'abonnement distant est réservé au service hors processus.
 
+**Lecture vidéo (2026-10-19)** : une vidéo YouTube se lit en 360p avec le son sur le Lumia 950.
+
+- Voie retenue, sans FFmpeg : vidéo VP8/VP9 par libvpx (déjà compilé en C pur pour WebRTC, `media_use_libvpx = true`), audio AAC par le décodeur Media Foundation du système, dans le moteur de rendu. Le décodage matériel (`D3D11VideoDecoder`) demande le processus GPU et ANGLE, absents tant que le rendu est logiciel.
+- `proprietary_codecs = true` pour les flux MP4/AAC de YouTube (MSE). Il active aussi l'encodeur OpenH264, dont les sources ne sont pas dans l'arbre : `media_use_openh264 = false`. HEVC et Dolby Vision coupés.
+- Types annoncés (`media/base/supported_types.cc`) : VP8, VP9 et AAC seulement, pour que les sites choisissent un flux décodable (YouTube sert alors VP9 + AAC).
+- `MediaFoundationAudioDecoder` ajouté aux décodeurs par défaut (`DefaultDecoderFactory`). Dans M116, il n'acceptait l'AAC que pour le xHE-AAC sous Windows 11 : sous `WINUWP`, tout l'AAC passe par lui. Le lecteur MP4 met un en-tête ADTS devant chaque trame, retiré avant le décodeur (qui attend de l'AAC brut). COM initialisé sur le thread média ; seul `mfplat.dll` est chargé.
+- Sortie audio : le moteur de rendu et le service audio échangent par un tube nommé (`base::SyncSocket`). Une app UWP ne peut en créer que sous `\\.\pipe\LOCAL\`, sinon `NOTREACHED` dans `sync_socket_win.cc`.
+- Coquille : le focus XAML rendu à la page n'est plus sur le bouton Recharger (une Entrée tapée dans un champ de la page le déclenchait), mais sur un contrôle invisible.
+
 ## Reste à faire
 
 | Sujet | Piste |
 | --- | --- |
-| Lecture vidéo | Décodeurs coupés à la compilation (`media_use_ffmpeg`, `media_use_libvpx`, `enable_dav1d_decoder` à false) : VP9 / H.264 logiciels, ou décodage matériel par Media Foundation |
+| Vidéo, suite | Définitions au-dessus de 360p : intrinsèques NEON de libvpx, ou H.264 par le décodeur Media Foundation du système ; plein écran |
 | Saisie de texte, suite | Composition et suggestions du clavier (soulignement) ; champs longs (Blink n'expose qu'une partie du texte, pas de resynchronisation) |
 | Coquille, suite | Avancer, onglets, favoris, menu ; barre masquée au défilement |
 | Fluidité | Rendu GPU (ANGLE sur D3D11) si le logiciel ne suffit pas ; mesurer à l'échelle 3 et 4 |
