@@ -23,10 +23,13 @@
 #include <cmath>
 #include <string>
 
+#include "base/barrier_closure.h"
 #include "base/base_paths.h"
 #include "base/command_line.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
+#include "base/functional/callback_helpers.h"
+#include "base/memory/memory_pressure_listener.h"
 #include "base/no_destructor.h"
 #include "base/path_service.h"
 #include "base/strings/escape.h"
@@ -41,14 +44,22 @@
 #include "content/public/app/content_main.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/render_widget_host_view.h"
+#include "content/public/browser/storage_partition.h"
 #include "content/public/browser/web_contents.h"
 #include "content/shell/browser/shell.h"
 #include "content/shell/browser/shell_uwp_host.h"
+#include "extensions/common/constants.h"
+#include "extensions/rhenium/rhenium_downloads.h"
 #include "extensions/rhenium/rhenium_extension_manager.h"
 #include "extensions/rhenium/rhenium_main_delegate.h"
+#include "extensions/rhenium/rhenium_pdf.h"
 #include "extensions/rhenium/rhenium_tab_model.h"
 #include "rhenium/log_export_uwp.h"
 #include "sandbox/win/src/sandbox_types.h"
+#include "services/network/public/mojom/clear_data_filter.mojom.h"
+#include "services/network/public/mojom/cookie_manager.mojom.h"
+#include "services/network/public/mojom/network_context.mojom.h"
+#include "third_party/blink/public/common/storage_key/storage_key.h"
 #include "ui/aura/window.h"
 #include "ui/display/display.h"
 #include "ui/display/display_list.h"
@@ -232,6 +243,7 @@ extern "C" int RheniumEngineRun(const RheniumHost* host) {
   shell_host.loading_changed = host->loading_changed;
   shell_host.title_changed = host->title_changed;
   shell_host.progress_changed = host->progress_changed;
+  shell_host.displayed_url = &rhenium::PdfSourceUrl;
   content::SetShellUwpHost(shell_host);
 
   // Pas de broker : en single-process, aucun processus n'est lancé.
@@ -250,6 +262,10 @@ extern "C" int RheniumEngineRun(const RheniumHost* host) {
   };
   g_extension_installed = host->extension_installed;
   rhenium::InitExtensions(extensions);
+  rhenium::DownloadObserver downloads;
+  downloads.context = host->context;
+  downloads.download_changed = host->download_changed;
+  rhenium::InitDownloads(downloads);
   rhenium::RheniumMainDelegate delegate;
   content::ContentMainParams params(&delegate);
   params.instance = GetModuleHandle(nullptr);
@@ -321,6 +337,12 @@ extern "C" void RheniumEngineListTabs(void (*visit)(void* context,
 
 extern "C" void RheniumEngineCaptureTab() {
   rhenium::CaptureActiveTab();
+}
+
+extern "C" int RheniumEngineDiscardTab() {
+  base::MemoryPressureListener::NotifyMemoryPressure(
+      base::MemoryPressureListener::MEMORY_PRESSURE_LEVEL_CRITICAL);
+  return rhenium::DiscardTab() ? 1 : 0;
 }
 
 extern "C" void RheniumEnginePointer(int kind,
@@ -399,6 +421,10 @@ extern "C" int RheniumEngineWebStoreId(const wchar_t* url, char id[33]) {
   return 1;
 }
 
+extern "C" void RheniumEngineCancelDownload(int id) {
+  rhenium::CancelDownload(id);
+}
+
 extern "C" int RheniumEngineInstallExtension(const char* id) {
   return rhenium::InstallFromWebStore(id ? id : "") ? 1 : 0;
 }
@@ -458,7 +484,57 @@ extern "C" void RheniumEngineSetVisible(int visible) {
   // (règles et permissions des extensions) sont écrites tout de suite.
   content::WebContents* web_contents = rhenium::GetActiveWebContents();
   if (web_contents && !visible) {
-    user_prefs::UserPrefs::Get(web_contents->GetBrowserContext())
-        ->CommitPendingWrite();
+    content::BrowserContext* context = web_contents->GetBrowserContext();
+    user_prefs::UserPrefs::Get(context)->CommitPendingWrite();
+    // De même pour les cookies (écrits par lots toutes les 30 s) et le
+    // stockage des sites (localStorage).
+    content::StoragePartition* partition =
+        context->GetDefaultStoragePartition();
+    partition->GetCookieManagerForBrowserProcess()->FlushCookieStore(
+        base::DoNothing());
+    partition->Flush();
   }
+}
+
+extern "C" void RheniumEngineClearBrowsingData(void (*done)(void* context),
+                                               void* context) {
+  content::WebContents* web_contents = rhenium::GetActiveWebContents();
+  if (!web_contents) {
+    if (done)
+      done(context);
+    return;
+  }
+  rhenium::Note("effacement des données de navigation");
+  base::RepeatingClosure cleared = base::BarrierClosure(
+      2, base::BindOnce(
+             [](void (*done)(void*), void* context) {
+               rhenium::Note("données de navigation effacées");
+               if (done)
+                 done(context);
+             },
+             done, context));
+  content::StoragePartition* partition =
+      web_contents->GetBrowserContext()->GetDefaultStoragePartition();
+  // Tout ce que les sites ont stocké, sauf ce qui appartient aux extensions
+  // (service worker et stockage de uBO Lite).
+  partition->ClearData(
+      content::StoragePartition::REMOVE_DATA_MASK_COOKIES |
+          content::StoragePartition::REMOVE_DATA_MASK_FILE_SYSTEMS |
+          content::StoragePartition::REMOVE_DATA_MASK_INDEXEDDB |
+          content::StoragePartition::REMOVE_DATA_MASK_LOCAL_STORAGE |
+          content::StoragePartition::REMOVE_DATA_MASK_WEBSQL |
+          content::StoragePartition::REMOVE_DATA_MASK_SERVICE_WORKERS |
+          content::StoragePartition::REMOVE_DATA_MASK_CACHE_STORAGE,
+      content::StoragePartition::QUOTA_MANAGED_STORAGE_MASK_ALL,
+      /*filter_builder=*/nullptr,
+      base::BindRepeating(
+          [](const blink::StorageKey& key, storage::SpecialStoragePolicy*) {
+            return key.origin().scheme() != extensions::kExtensionScheme;
+          }),
+      network::mojom::CookieDeletionFilter::New(),
+      /*perform_storage_cleanup=*/true, base::Time(), base::Time::Max(),
+      cleared);
+  partition->GetNetworkContext()->ClearHttpCache(base::Time(),
+                                                 base::Time::Max(),
+                                                 /*filter=*/nullptr, cleared);
 }

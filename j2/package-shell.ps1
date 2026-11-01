@@ -4,14 +4,15 @@
   Empaquette l'app Rhénium (rhenium_shell.exe et ses données) en .appx signé, avec le certificat
   de développement de la sonde (..\sonde\certs, créé au besoin par ..\sonde\dev-cert.ps1).
   J4 : uBlock Origin Lite (..\j4\fetch-ubol.ps1) dans Extensions\uBOLite, installé au premier
-  lancement.
+  lancement. J5 : PDF.js (..\j5\fetch-pdfjs.ps1) dans Extensions\PdfViewer.
 .EXAMPLE
-  ../j4/fetch-ubol.ps1 ; ./build-content.ps1 -KeepGoing ; ./package-shell.ps1
+  ../j4/fetch-ubol.ps1 ; ../j5/fetch-pdfjs.ps1 ; ./build-content.ps1 -KeepGoing ; ./package-shell.ps1
   ..\sonde\deploy.ps1 -Ip 127.0.0.1 -Appx ..\j2\out\RheniumShell_arm.appx
 #>
 param(
   [string] $OutDir = "$PSScriptRoot\..\chromium\src\out\content-arm",
-  [string] $UbolDir = "$PSScriptRoot\..\j4\out\ubol\uBOLite"
+  [string] $UbolDir = "$PSScriptRoot\..\j4\out\ubol\uBOLite",
+  [string] $PdfjsDir = "$PSScriptRoot\..\j5\out\pdfjs\PdfViewer"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -97,6 +98,8 @@ Invoke-Tool "$sdkBin\makepri.exe" @('new', '/pr', $pkg, '/cf', "$out\priconfig.x
 if (-not (Test-Path "$UbolDir\manifest.json")) { throw "uBO Lite absent de $UbolDir : lancer ..\j4\fetch-ubol.ps1." }
 New-Item -ItemType Directory -Force "$pkg\Extensions" | Out-Null
 Copy-Item $UbolDir "$pkg\Extensions\uBOLite" -Recurse
+if (-not (Test-Path "$PdfjsDir\manifest.json")) { throw "PDF.js absent de $PdfjsDir : lancer ..\j5\fetch-pdfjs.ps1." }
+Copy-Item $PdfjsDir "$pkg\Extensions\PdfViewer" -Recurse
 
 $appx = "$out\RheniumShell_arm.appx"
 Invoke-Tool "$sdkBin\makeappx.exe" @('pack', '/d', $pkg, '/p', $appx, '/o')

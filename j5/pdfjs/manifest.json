@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "PDF.js",
+  "version": "5.4.624.1",
+  "description": "PDF viewer by Mozilla, built into Rhénium.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAy10rKgAnsQt7t/REIcWwBJuH4RgBUcktJKvhVmLrhjx5uZrb7xmYVR8XnK5dTvqKERYafZRrSxsjBktsBTlP8JXYZXuEWrf0M2/xNJ1ZqQCnS9CUeR3FZfH1awjB/VkcYUv9a+Rlr5vXXxXfOO0XoEgefNgBw+KebC9enB+r76s8G1ErGde+mOjUazrTpW8A0sm1eCj44BgjYN1SZXlY7dPiVC+ygvQz2jZ2w3M1s7y0+seZoa4rSdoNSg7gKWnf9KprgvZlCLo7Zinq0ulGSGc6hxgQEqULwPULVfWpKqDMdOg5U6drSnxMN4Vg9Eb2H1ny5jruj/5khIl46P6fEwIDAQAB",
+  "host_permissions": ["<all_urls>"],
+  "minimum_chrome_version": "110"
+}

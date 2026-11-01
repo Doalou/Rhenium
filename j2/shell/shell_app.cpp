@@ -10,8 +10,9 @@
 //
 // Interface construite en code, comme Edge sur Windows 10 Mobile : en bas,
 // l'adresse, le bouton des onglets et « … », qui déplie au-dessus un menu
-// (icônes puis commandes). Onglets, historique et paramètres s'ouvrent en
-// plein écran. Le précédent passe par le bouton retour du téléphone.
+// (icônes puis commandes). Onglets, favoris, historique, téléchargements et
+// paramètres s'ouvrent en plein écran ; un bandeau suit le dernier
+// téléchargement. Le précédent passe par le bouton retour du téléphone.
 
 #include <windows.h>
 
@@ -26,8 +27,10 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 #include <windows.ui.xaml.media.dxinterop.h>
 
@@ -38,6 +41,7 @@
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Foundation.Metadata.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Storage.AccessCache.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.System.Threading.h>
@@ -98,6 +102,11 @@ constexpr wchar_t kUbolSourcesUrl[] =
 
 constexpr wchar_t kHistoryFile[] = L"history.txt";
 constexpr wchar_t kTabsFile[] = L"tabs.txt";
+constexpr wchar_t kFavoritesFile[] = L"favorites.txt";
+constexpr wchar_t kDownloadsFile[] = L"downloads.txt";
+// Au-delà, les téléchargements les plus anciens quittent la liste (pas le
+// dossier Téléchargements).
+constexpr size_t kMaxDownloads = 50;
 // Au-delà, les visites les plus anciennes sont oubliées.
 constexpr size_t kMaxHistory = 500;
 // Visites affichées d'un coup ; « Plus » en ajoute autant.
@@ -112,6 +121,8 @@ constexpr wchar_t kGlyphShare[] = L"\xE72D";
 constexpr wchar_t kGlyphShield[] = L"\xEA18";
 constexpr wchar_t kGlyphMore[] = L"\xE712";
 constexpr wchar_t kGlyphAdd[] = L"\xE710";
+constexpr wchar_t kGlyphFavorite[] = L"\xE734";
+constexpr wchar_t kGlyphFavoriteFill[] = L"\xE735";
 
 constexpr Color kBarColor{0xFF, 0x1F, 0x1F, 0x1F};
 constexpr Color kMenuColor{0xFF, 0x2B, 0x2B, 0x2B};
@@ -130,6 +141,25 @@ struct HistoryEntry {
 struct SavedTab {
   std::wstring url;
   std::wstring title;
+};
+
+struct Favorite {
+  std::wstring url;
+  std::wstring title;
+};
+
+// Téléchargement de cette session (id du moteur) ou d'une précédente (id 0).
+// Une fois déplacé dans Téléchargements, le fichier se retrouve par son jeton
+// de la FutureAccessList.
+struct DownloadEntry {
+  int id = 0;
+  long long time = 0;  // FILETIME, UTC : identifie la ligne
+  std::wstring name;
+  int state = RHENIUM_DOWNLOAD_IN_PROGRESS;
+  long long received = 0;
+  long long total = -1;
+  bool moving = false;  // terminé, en cours de déplacement
+  std::wstring token;
 };
 
 struct ShellState {
@@ -156,6 +186,21 @@ struct ShellState {
   Button new_tab{nullptr};
   Grid history{nullptr};
   StackPanel history_list{nullptr};
+  Grid favorites_panel{nullptr};
+  StackPanel favorite_list{nullptr};
+  FontIcon favorite_icon{nullptr};  // étoile du menu, pleine sur un favori
+  Grid downloads_panel{nullptr};
+  StackPanel download_list{nullptr};
+  std::map<long long, TextBlock> download_details;  // lignes affichées
+  // Bandeau du dernier téléchargement, au bas de la page.
+  Grid banner{nullptr};
+  TextBlock banner_name{nullptr};
+  TextBlock banner_detail{nullptr};
+  ProgressBar banner_progress{nullptr};
+  Button banner_action{nullptr};
+  DispatcherTimer banner_timer{nullptr};
+  long long banner_time = 0;
+  DispatcherTimer memory_timer{nullptr};
   CoreDispatcher dispatcher{nullptr};
   RheniumHost host{};
   std::wstring url;
@@ -174,6 +219,8 @@ struct ShellState {
   std::map<int, Image> card_images;
   std::vector<HistoryEntry> visits;  // de la plus ancienne à la plus récente
   std::vector<SavedTab> restore;  // onglets à rouvrir après le premier
+  std::vector<Favorite> favorites;  // du plus ancien au plus récent
+  std::vector<DownloadEntry> downloads;  // du plus ancien au plus récent
   size_t history_shown = 0;
   int history_day = 0;  // dernier jour affiché, AAAAMMJJ
 };
@@ -376,20 +423,63 @@ std::string HistoryText() {
   return data;
 }
 
-// Hors du thread UI ; seule la dernière demande compte.
-void SaveHistory() {
-  static std::atomic<unsigned> latest{0};
+// Hors du thread UI ; pour chaque fichier, seule la dernière demande compte.
+void SaveLater(wchar_t const* name,
+               std::string data,
+               std::atomic<unsigned>& latest) {
   const unsigned request = ++latest;
   Windows::System::Threading::ThreadPool::RunAsync(
-      [data = HistoryText(), path = LocalPath(kHistoryFile),
+      [data = std::move(data), name, path = LocalPath(name), &latest,
        request](auto&&) {
         std::lock_guard<std::mutex> lock(g_writing);
         if (request != latest || WriteLocalFile(path, data))
           return;
-        g_shell->dispatcher.RunAsync(CoreDispatcherPriority::Normal, [] {
-          RheniumEngineNote(L"coquille : historique non écrit");
+        g_shell->dispatcher.RunAsync(CoreDispatcherPriority::Normal, [name] {
+          RheniumEngineNote(
+              (L"coquille : " + std::wstring(name) + L" non écrit").c_str());
         });
       });
+}
+
+// Dernière écriture demandée pour l'historique et les onglets.
+std::atomic<unsigned> g_history_saves{0};
+std::atomic<unsigned> g_tabs_saves{0};
+
+void SaveHistory() {
+  SaveLater(kHistoryFile, HistoryText(), g_history_saves);
+}
+
+// Titre ou adresse dans un champ de fichier : sans tabulation ni saut.
+std::wstring CleanField(std::wstring text) {
+  for (wchar_t& c : text) {
+    if (c == L'\t' || c == L'\r' || c == L'\n')
+      c = L' ';
+  }
+  return text;
+}
+
+// Favoris : adresse, titre.
+void LoadFavorites() {
+  for (auto const& line : ReadLines(kFavoritesFile, 2))
+    g_shell->favorites.push_back({line[0], line[1]});
+}
+
+void SaveFavorites() {
+  static std::atomic<unsigned> latest{0};
+  std::string data;
+  for (Favorite const& favorite : g_shell->favorites)
+    data += to_string(favorite.url) + '\t' + to_string(favorite.title) + '\n';
+  SaveLater(kFavoritesFile, std::move(data), latest);
+}
+
+std::vector<Favorite>::iterator FindFavorite(std::wstring const& url) {
+  std::vector<Favorite>& favorites = g_shell->favorites;
+  return std::find_if(favorites.begin(), favorites.end(),
+                      [&](Favorite const& favorite) { return favorite.url == url; });
+}
+
+bool CanBeFavorite(std::wstring const& url) {
+  return url.rfind(L"https://", 0) == 0 || url.rfind(L"http://", 0) == 0;
 }
 
 // Onglets : actif (1 ou 0), adresse, titre.
@@ -401,21 +491,39 @@ void AddSavedTab(void* data,
   try {
     if (*url) {
       *static_cast<std::string*>(data) += (active ? "1\t" : "0\t") +
-                                          to_string(url) + '\t' +
-                                          to_string(title) + '\n';
+                                          to_string(CleanField(url)) + '\t' +
+                                          to_string(CleanField(title)) + '\n';
     }
   } catch (...) {
   }
 }
 
-// Avant que le système ne suspende puis, souvent, ne tue l'app : historique
-// et onglets, tout de suite.
-void SaveSession() {
+std::string TabsText() {
   std::string tabs;
   RheniumEngineListTabs(&AddSavedTab, &tabs);
+  return tabs;
+}
+
+// À chaque page et à chaque changement d'onglet : l'app peut être tuée sans
+// passer par l'arrière-plan (mise à jour, plantage). Pas tant que les onglets
+// de la session précédente ne sont pas tous rouverts.
+void SaveTabs() {
+  if (g_shell->restore.empty())
+    SaveLater(kTabsFile, TabsText(), g_tabs_saves);
+}
+
+// Avant que le système ne suspende puis, souvent, ne tue l'app : historique
+// et onglets, tout de suite. Les écritures en attente, plus anciennes, sont
+// abandonnées.
+void SaveSession() {
+  const bool tabs_ready = g_shell->restore.empty();
+  const std::string tabs = tabs_ready ? TabsText() : std::string();
+  ++g_history_saves;
+  if (tabs_ready)
+    ++g_tabs_saves;
   std::lock_guard<std::mutex> lock(g_writing);
   if (!WriteLocalFile(LocalPath(kHistoryFile), HistoryText()) ||
-      !WriteLocalFile(LocalPath(kTabsFile), tabs)) {
+      (tabs_ready && !WriteLocalFile(LocalPath(kTabsFile), tabs))) {
     RheniumEngineNote(L"coquille : session non écrite");
   }
 }
@@ -478,6 +586,11 @@ void OpenMenu() {
   shell.reload_icon.Glyph(shell.loading ? kGlyphCancel : kGlyphReload);
   shell.reload_label.Text(shell.loading ? Tr(L"Arrêter", L"Stop")
                                        : Tr(L"Actualiser", L"Refresh"));
+  shell.favorite_icon.Glyph(FindFavorite(shell.url) != shell.favorites.end()
+                                ? kGlyphFavoriteFill
+                                : kGlyphFavorite);
+  shell.favorite_icon.Foreground(
+      Brush(CanBeFavorite(shell.url) ? kTextColor : kDimTextColor));
   char id[33];
   shell.add_extension.Visibility(
       !shell.installing && RheniumEngineWebStoreId(shell.url.c_str(), id)
@@ -589,6 +702,13 @@ void OnTitleChanged(void*, wchar_t const* title) noexcept {
 bool TabsOpen();
 void RebuildTabs();
 void OnExtensionInstalled(void*, int ok, wchar_t const* text) noexcept;
+void OnDownloadChanged(void*,
+                       int id,
+                       int state,
+                       long long received,
+                       long long total,
+                       wchar_t const* name,
+                       wchar_t const* path) noexcept;
 
 void CollectTabId(void* ids, int id, int, wchar_t const*, wchar_t const*) noexcept {
   try {
@@ -614,6 +734,7 @@ void OnTabsChanged(void*, int count) noexcept {
     }
     if (TabsOpen())
       RebuildTabs();
+    SaveTabs();
     if (!shell.restore.empty()) {
       shell.dispatcher.RunAsync(CoreDispatcherPriority::Low,
                                 [] { RestoreTabs(); });
@@ -649,11 +770,7 @@ void OnTabThumbnail(void*,
 void OnPageVisited(void*, wchar_t const* url, wchar_t const* title) noexcept {
   try {
     std::vector<HistoryEntry>& visits = g_shell->visits;
-    std::wstring clean(title);
-    for (wchar_t& c : clean) {
-      if (c == L'\t' || c == L'\r' || c == L'\n')
-        c = L' ';
-    }
+    std::wstring clean = CleanField(title);
     if (!visits.empty() && visits.back().url == url) {
       if (clean.empty() || clean == visits.back().title)
         return;
@@ -664,8 +781,58 @@ void OnPageVisited(void*, wchar_t const* url, wchar_t const* title) noexcept {
         visits.erase(visits.begin(), visits.end() - kMaxHistory);
     }
     SaveHistory();
+    SaveTabs();
   } catch (...) {
   }
+}
+
+void NoteMemory(wchar_t const* text, unsigned long long limit) {
+  wchar_t line[128];
+  swprintf_s(line, L"coquille : %s, %llu Mo sur %llu Mo", text,
+             Windows::System::MemoryManager::AppMemoryUsage() >> 20,
+             limit >> 20);
+  RheniumEngineNote(line);
+}
+
+// Mémoire de l'app près de sa limite : l'onglet inactif utilisé le moins
+// récemment est déchargé, puis un autre toutes les 2 s tant qu'elle y reste.
+void RelieveMemory(unsigned long long limit) {
+  using Windows::System::AppMemoryUsageLevel;
+  using Windows::System::MemoryManager;
+  ShellState& shell = *g_shell;
+  shell.memory_timer.Stop();
+  if (MemoryManager::AppMemoryUsageLevel() < AppMemoryUsageLevel::High &&
+      MemoryManager::AppMemoryUsage() < limit / 10 * 9) {
+    return;
+  }
+  NoteMemory(L"mémoire critique", limit);
+  if (RheniumEngineDiscardTab())
+    shell.memory_timer.Start();
+}
+
+// Les événements arrivent sur un autre thread.
+void WatchMemory() {
+  using Windows::System::MemoryManager;
+  ShellState& shell = *g_shell;
+  shell.memory_timer = DispatcherTimer();
+  shell.memory_timer.Interval(std::chrono::seconds(2));
+  shell.memory_timer.Tick([](auto&&, auto&&) {
+    RelieveMemory(Windows::System::MemoryManager::AppMemoryUsageLimit());
+  });
+  MemoryManager::AppMemoryUsageIncreased([](auto&&, auto&&) {
+    g_shell->dispatcher.RunAsync(CoreDispatcherPriority::Normal, [] {
+      RelieveMemory(Windows::System::MemoryManager::AppMemoryUsageLimit());
+    });
+  });
+  // Limite abaissée, à la mise en arrière-plan par exemple.
+  MemoryManager::AppMemoryUsageLimitChanging(
+      [](auto&&,
+         Windows::System::AppMemoryUsageLimitChangingEventArgs const& args) {
+        const unsigned long long limit = args.NewLimit();
+        g_shell->dispatcher.RunAsync(CoreDispatcherPriority::Normal,
+                                     [limit] { RelieveMemory(limit); });
+      });
+  NoteMemory(L"mémoire", MemoryManager::AppMemoryUsageLimit());
 }
 
 // Lance le moteur une fois la taille du panneau connue. RheniumEngineRun ne
@@ -690,6 +857,8 @@ void StartEngine() {
   shell.host.page_visited = &OnPageVisited;
   shell.host.tab_thumbnail = &OnTabThumbnail;
   shell.host.extension_installed = &OnExtensionInstalled;
+  shell.host.download_changed = &OnDownloadChanged;
+  WatchMemory();
   shell.url = shell.start_url;
   ShowAddress();
   shell.dispatcher.RunAsync(CoreDispatcherPriority::Low,
@@ -796,6 +965,9 @@ Button MenuItem(wchar_t const* text, Action action) {
 
 void OpenSettings();
 void OpenHistory();
+void OpenFavorites();
+void OpenDownloads();
+void ToggleFavorite();
 void NewTab();
 void RebuildExtensions();
 void SetLanguage(int index);
@@ -847,6 +1019,7 @@ Border BuildMenu() {
                            [] { RheniumEngineGoForward(); });
   shell.reload_icon = Glyph(kGlyphReload);
   shell.reload_label = Label(Tr(L"Actualiser", L"Refresh"), 11);
+  shell.favorite_icon = Glyph(kGlyphFavorite);
   Grid icons;
   int column = 0;
   for (Button const& button :
@@ -858,6 +1031,8 @@ Border BuildMenu() {
                    else
                      RheniumEngineReload();
                  }),
+        MenuIcon(shell.favorite_icon, Label(Tr(L"Favori", L"Favorite"), 11),
+                 ToggleFavorite),
         MenuIcon(Glyph(kGlyphShare), Label(Tr(L"Partager", L"Share"), 11),
                  [] { DataTransferManager::ShowShareUI(); }),
         MenuIcon(Glyph(kGlyphShield), Label(L"uBlock", 11), [] {
@@ -875,7 +1050,10 @@ Border BuildMenu() {
   shell.add_extension.Visibility(Visibility::Collapsed);
   items.Children().Append(shell.add_extension);
   items.Children().Append(MenuItem(Tr(L"Nouvel onglet", L"New tab"), NewTab));
+  items.Children().Append(MenuItem(Tr(L"Favoris", L"Favorites"), OpenFavorites));
   items.Children().Append(MenuItem(Tr(L"Historique", L"History"), OpenHistory));
+  items.Children().Append(
+      MenuItem(Tr(L"Téléchargements", L"Downloads"), OpenDownloads));
   items.Children().Append(MenuItem(Tr(L"Accueil", L"Home"), [] {
     RheniumEngineNavigate(HomeUrl().c_str());
   }));
@@ -973,6 +1151,32 @@ void ConfirmUninstall(ExtensionEntry const& entry) {
     dialog.PrimaryButtonClick([id = entry.id](auto&&, auto&&) {
       RheniumEngineUninstallExtension(id.c_str());
       RebuildExtensions();
+    });
+    dialog.ShowAsync();
+  } catch (...) {
+  }
+}
+
+void OnBrowsingDataCleared(void*) noexcept {
+  ShowMessage(Tr(L"Données effacées", L"Data cleared"),
+              Tr(L"Les cookies, le cache et les données des sites sont "
+                 L"effacés.",
+                 L"Cookies, cache and site data have been cleared."));
+}
+
+void ConfirmClearData() {
+  try {
+    ContentDialog dialog;
+    dialog.Title(box_value(Tr(L"Effacer les données", L"Clear data")));
+    dialog.Content(box_value(
+        Tr(L"Effacer les cookies, le cache et les données des sites ? Vous "
+           L"serez déconnecté des sites.",
+           L"Clear cookies, cache and site data? You will be signed out of "
+           L"websites.")));
+    dialog.PrimaryButtonText(Tr(L"Effacer", L"Clear"));
+    dialog.CloseButtonText(Tr(L"Annuler", L"Cancel"));
+    dialog.PrimaryButtonClick([](auto&&, auto&&) {
+      RheniumEngineClearBrowsingData(OnBrowsingDataCleared, nullptr);
     });
     dialog.ShowAsync();
   } catch (...) {
@@ -1115,6 +1319,19 @@ Grid BuildSettings() {
                L"Rhénium lacks may not work."),
             15, kDimTextColor));
   add(Link(L"Chrome Web Store", [] { RheniumEngineNavigate(kWebStoreUrl); }));
+
+  add(SectionTitle(Tr(L"Confidentialité", L"Privacy")));
+  add(Label(Tr(L"Les cookies et les données des sites sont gardés d'un "
+               L"lancement à l'autre.",
+               L"Cookies and site data are kept between launches."),
+            15, kDimTextColor));
+  HyperlinkButton clear_data;
+  clear_data.Content(box_value(Tr(L"Effacer les cookies et les données des "
+                                  L"sites",
+                                  L"Clear cookies and site data")));
+  clear_data.Padding(Thickness{0, 4, 0, 4});
+  clear_data.Click([](auto&&, auto&&) { ConfirmClearData(); });
+  add(clear_data);
 
   add(SectionTitle(Tr(L"À propos", L"About")));
   const auto version =
@@ -1390,35 +1607,70 @@ void RemoveVisit(long long time, std::wstring const& url) {
 
 void RebuildHistory();
 
-// Visite : titre et site ; un appui long propose de la supprimer.
-Button VisitItem(HistoryEntry const& entry) {
+// Ligne d'une liste (historique, favoris, téléchargements) : titre et
+// détail (site, état). Un toucher l'ouvre ; un appui long, ou un clic droit
+// à la souris, affiche son menu. Au toucher, le bouton reçoit aussi un Click
+// au relâchement de l'appui long : ignoré.
+template <typename Open, typename Menu>
+Button ListItem(std::wstring const& title,
+                std::wstring const& detail,
+                Open open,
+                Menu build_menu) {
   StackPanel text;
-  text.Children().Append(Trimmed(Label(
-      entry.title.empty() ? entry.url.c_str() : entry.title.c_str(), 15)));
-  text.Children().Append(
-      Trimmed(Label(DisplayText(entry.url).c_str(), 12, kDimTextColor)));
+  text.Children().Append(Trimmed(Label(title.c_str(), 15)));
+  text.Children().Append(Trimmed(Label(detail.c_str(), 12, kDimTextColor)));
   Button item = FlatButton();
   item.HorizontalAlignment(HorizontalAlignment::Stretch);
   item.HorizontalContentAlignment(HorizontalAlignment::Left);
   item.Padding(Thickness{0, 8, 0, 8});
   item.Content(text);
-  item.Click([url = entry.url](auto&&, auto&&) {
-    CloseHistory();
-    RheniumEngineNavigate(url.c_str());
+  auto held = std::make_shared<bool>(false);
+  item.Click([held, open](auto&&, auto&&) {
+    if (!std::exchange(*held, false))
+      open();
   });
-  item.RightTapped([time = entry.time, url = entry.url](
-                       Windows::Foundation::IInspectable const& sender, auto&&) {
-    MenuFlyoutItem remove;
-    remove.Text(Tr(L"Supprimer", L"Delete"));
-    remove.Click([time, url](auto&&, auto&&) {
-      RemoveVisit(time, url);
-      RebuildHistory();
-    });
-    MenuFlyout menu;
-    menu.Items().Append(remove);
-    menu.ShowAt(sender.as<FrameworkElement>());
+  auto show_menu = [held, build_menu](FrameworkElement const& target) {
+    MenuFlyout menu = build_menu();
+    menu.Closed([held](auto&&, auto&&) { *held = false; });
+    menu.ShowAt(target);
+  };
+  item.Holding([held, show_menu](Windows::Foundation::IInspectable const& sender,
+                                 HoldingRoutedEventArgs const& args) {
+    if (args.HoldingState() != Windows::UI::Input::HoldingState::Started)
+      return;
+    args.Handled(true);
+    *held = true;
+    show_menu(sender.as<FrameworkElement>());
+  });
+  item.RightTapped([show_menu](Windows::Foundation::IInspectable const& sender,
+                               RightTappedRoutedEventArgs const& args) {
+    if (args.PointerDeviceType() ==
+        Windows::Devices::Input::PointerDeviceType::Mouse) {
+      show_menu(sender.as<FrameworkElement>());
+    }
   });
   return item;
+}
+
+// Visite ; son menu propose de la supprimer.
+Button VisitItem(HistoryEntry const& entry) {
+  return ListItem(
+      entry.title.empty() ? entry.url : entry.title, DisplayText(entry.url),
+      [url = entry.url] {
+        CloseHistory();
+        RheniumEngineNavigate(url.c_str());
+      },
+      [time = entry.time, url = entry.url] {
+        MenuFlyoutItem remove;
+        remove.Text(Tr(L"Supprimer", L"Delete"));
+        remove.Click([time, url](auto&&, auto&&) {
+          RemoveVisit(time, url);
+          RebuildHistory();
+        });
+        MenuFlyout menu;
+        menu.Items().Append(remove);
+        return menu;
+      });
 }
 
 // Ajoute les kHistoryPage visites suivantes, des plus récentes aux plus
@@ -1496,6 +1748,591 @@ Grid BuildHistory() {
   history.Children().Append(scroll);
   history.Visibility(Visibility::Collapsed);
   return history;
+}
+
+// Favoris
+
+// Étoile du menu : ajoute la page de l'onglet actif, ou la retire.
+void ToggleFavorite() {
+  ShellState& shell = *g_shell;
+  if (!CanBeFavorite(shell.url))
+    return;
+  if (auto it = FindFavorite(shell.url); it != shell.favorites.end()) {
+    shell.favorites.erase(it);
+  } else {
+    shell.favorites.push_back(
+        {CleanField(shell.url),
+         CleanField(shell.title.empty() ? shell.url : shell.title)});
+  }
+  SaveFavorites();
+}
+
+void CloseFavorites() {
+  g_shell->favorites_panel.Visibility(Visibility::Collapsed);
+  g_shell->favorite_list.Children().Clear();
+}
+
+void RebuildFavorites();
+
+void RenameFavorite(std::wstring const& url) {
+  auto it = FindFavorite(url);
+  if (it == g_shell->favorites.end())
+    return;
+  try {
+    TextBox name;
+    name.Text(it->title);
+    name.SelectAll();
+    ContentDialog dialog;
+    dialog.Title(box_value(Tr(L"Renommer le favori", L"Rename favorite")));
+    dialog.Content(name);
+    dialog.PrimaryButtonText(Tr(L"Renommer", L"Rename"));
+    dialog.CloseButtonText(Tr(L"Annuler", L"Cancel"));
+    dialog.PrimaryButtonClick([url, name](auto&&, auto&&) {
+      auto it = FindFavorite(url);
+      const std::wstring title = CleanField(std::wstring(name.Text()));
+      if (it == g_shell->favorites.end() || title.empty())
+        return;
+      it->title = title;
+      SaveFavorites();
+      RebuildFavorites();
+    });
+    dialog.ShowAsync();
+  } catch (...) {
+  }
+}
+
+// Favori ; son menu propose de le renommer ou de le supprimer.
+Button FavoriteItem(Favorite const& favorite) {
+  return ListItem(
+      favorite.title, DisplayText(favorite.url),
+      [url = favorite.url] {
+        CloseFavorites();
+        RheniumEngineNavigate(url.c_str());
+      },
+      [url = favorite.url] {
+        MenuFlyoutItem rename;
+        rename.Text(Tr(L"Renommer", L"Rename"));
+        rename.Click([url](auto&&, auto&&) { RenameFavorite(url); });
+        MenuFlyoutItem remove;
+        remove.Text(Tr(L"Supprimer", L"Delete"));
+        remove.Click([url](auto&&, auto&&) {
+          if (auto it = FindFavorite(url); it != g_shell->favorites.end()) {
+            g_shell->favorites.erase(it);
+            SaveFavorites();
+          }
+          RebuildFavorites();
+        });
+        MenuFlyout menu;
+        menu.Items().Append(rename);
+        menu.Items().Append(remove);
+        return menu;
+      });
+}
+
+// Du plus récent au plus ancien.
+void RebuildFavorites() {
+  ShellState& shell = *g_shell;
+  auto children = shell.favorite_list.Children();
+  children.Clear();
+  if (shell.favorites.empty()) {
+    TextBlock empty = Label(
+        Tr(L"Aucun favori. Pour en ajouter un : « … », puis l'étoile.",
+           L"No favorites yet. To add one: “…”, then the star."),
+        15, kDimTextColor);
+    empty.Margin(Thickness{0, 16, 0, 0});
+    children.Append(empty);
+    return;
+  }
+  for (auto it = shell.favorites.rbegin(); it != shell.favorites.rend(); ++it)
+    children.Append(FavoriteItem(*it));
+}
+
+void OpenFavorites() {
+  RebuildFavorites();
+  g_shell->favorites_panel.Visibility(Visibility::Visible);
+}
+
+Grid BuildFavorites() {
+  ShellState& shell = *g_shell;
+  shell.favorite_list = StackPanel();
+  shell.favorite_list.Margin(Thickness{0, 8, 0, 0});
+  StackPanel content;
+  content.Padding(Thickness{20, 12, 20, 24});
+  content.Children().Append(PanelHeader(Tr(L"FAVORIS", L"FAVORITES")));
+  content.Children().Append(shell.favorite_list);
+  ScrollViewer scroll;
+  scroll.Content(content);
+  Grid favorites;
+  favorites.Background(Brush(kBarColor));
+  favorites.Children().Append(scroll);
+  favorites.Visibility(Visibility::Collapsed);
+  return favorites;
+}
+
+// Téléchargements
+
+using Windows::Storage::AccessCache::StorageApplicationPermissions;
+
+// Ceux des sessions précédentes, déjà dans Téléchargements : heure, taille,
+// jeton, nom.
+void LoadDownloads() {
+  for (auto const& line : ReadLines(kDownloadsFile, 4)) {
+    DownloadEntry entry;
+    entry.time = std::wcstoll(line[0].c_str(), nullptr, 10);
+    entry.received = entry.total = std::wcstoll(line[1].c_str(), nullptr, 10);
+    entry.token = line[2];
+    entry.name = line[3];
+    entry.state = RHENIUM_DOWNLOAD_COMPLETE;
+    g_shell->downloads.push_back(std::move(entry));
+  }
+}
+
+void SaveDownloads() {
+  static std::atomic<unsigned> latest{0};
+  std::string data;
+  for (DownloadEntry const& entry : g_shell->downloads) {
+    if (entry.token.empty())
+      continue;
+    data += std::to_string(entry.time) + '\t' + std::to_string(entry.received) +
+            '\t' + to_string(entry.token) + '\t' + to_string(entry.name) + '\n';
+  }
+  SaveLater(kDownloadsFile, std::move(data), latest);
+}
+
+DownloadEntry* FindDownload(long long time) {
+  for (DownloadEntry& entry : g_shell->downloads) {
+    if (entry.time == time)
+      return &entry;
+  }
+  return nullptr;
+}
+
+DownloadEntry* FindDownloadById(int id) {
+  for (DownloadEntry& entry : g_shell->downloads) {
+    if (entry.id == id)
+      return &entry;
+  }
+  return nullptr;
+}
+
+// Retire la ligne, pas le fichier.
+void ForgetDownload(long long time) {
+  std::vector<DownloadEntry>& downloads = g_shell->downloads;
+  auto it = std::find_if(
+      downloads.begin(), downloads.end(),
+      [&](DownloadEntry const& entry) { return entry.time == time; });
+  if (it == downloads.end())
+    return;
+  if (!it->token.empty()) {
+    try {
+      StorageApplicationPermissions::FutureAccessList().Remove(it->token);
+    } catch (...) {
+    }
+  }
+  downloads.erase(it);
+  SaveDownloads();
+}
+
+std::wstring SizeText(long long bytes) {
+  wchar_t text[32];
+  if (bytes < 1024 * 1024) {
+    swprintf_s(text, Tr(L"%lld Ko", L"%lld KB"), (bytes + 1023) / 1024);
+  } else {
+    swprintf_s(text, Tr(L"%.1f Mo", L"%.1f MB"),
+               static_cast<double>(bytes) / (1024 * 1024));
+  }
+  std::wstring size(text);
+  if (!g_english)
+    std::replace(size.begin(), size.end(), L'.', L',');
+  return size;
+}
+
+std::wstring DownloadName(DownloadEntry const& entry) {
+  return entry.name.empty() ? Tr(L"Téléchargement", L"Download") : entry.name;
+}
+
+std::wstring DownloadDetail(DownloadEntry const& entry) {
+  if (entry.state == RHENIUM_DOWNLOAD_FAILED)
+    return Tr(L"Échec", L"Failed");
+  if (entry.moving)
+    return Tr(L"Enregistrement…", L"Saving…");
+  if (entry.state == RHENIUM_DOWNLOAD_COMPLETE)
+    return Tr(L"Terminé · ", L"Done · ") + SizeText(entry.received);
+  if (entry.total <= 0)
+    return SizeText(entry.received);
+  wchar_t percent[16];
+  swprintf_s(percent, Tr(L"%d %% · ", L"%d%% · "),
+             static_cast<int>(entry.received * 100 / entry.total));
+  return percent + SizeText(entry.received) + Tr(L" sur ", L" of ") +
+         SizeText(entry.total);
+}
+
+bool DownloadsOpen() {
+  return g_shell->downloads_panel && IsShown(g_shell->downloads_panel);
+}
+
+void RebuildDownloads();
+
+fire_and_forget OpenDownloadFile(std::wstring token) {
+  bool found = false;
+  try {
+    auto file =
+        co_await StorageApplicationPermissions::FutureAccessList().GetFileAsync(
+            token);
+    found = true;
+    co_await resume_foreground(g_shell->dispatcher);
+    co_await Windows::System::Launcher::LaunchFileAsync(file);
+  } catch (...) {
+  }
+  if (!found) {
+    co_await resume_foreground(g_shell->dispatcher);
+    ShowMessage(Tr(L"Fichier introuvable", L"File not found"),
+                Tr(L"Le fichier a été déplacé ou supprimé.",
+                   L"The file was moved or deleted."));
+  }
+}
+
+fire_and_forget DeleteDownloadFile(long long time, std::wstring token) {
+  try {
+    auto file =
+        co_await StorageApplicationPermissions::FutureAccessList().GetFileAsync(
+            token);
+    co_await file.DeleteAsync();
+  } catch (...) {
+  }
+  co_await resume_foreground(g_shell->dispatcher);
+  ForgetDownload(time);
+  if (DownloadsOpen())
+    RebuildDownloads();
+}
+
+// Bandeau : le dernier téléchargement, avec « Annuler » pendant, « Ouvrir »
+// après, refermé seul quelques secondes après la fin.
+void HideBanner() {
+  ShellState& shell = *g_shell;
+  shell.banner.Visibility(Visibility::Collapsed);
+  shell.banner_timer.Stop();
+  shell.banner_time = 0;
+}
+
+void RefreshBanner(DownloadEntry const& entry) {
+  ShellState& shell = *g_shell;
+  shell.banner_name.Text(DownloadName(entry));
+  shell.banner_detail.Text(DownloadDetail(entry));
+  const bool running = entry.state == RHENIUM_DOWNLOAD_IN_PROGRESS;
+  shell.banner_progress.Visibility(running || entry.moving
+                                       ? Visibility::Visible
+                                       : Visibility::Collapsed);
+  shell.banner_progress.IsIndeterminate(entry.moving || entry.total <= 0);
+  if (entry.total > 0) {
+    shell.banner_progress.Value(static_cast<double>(entry.received) /
+                                entry.total);
+  }
+  const bool can_open = !entry.token.empty();
+  shell.banner_action.Visibility(running || can_open ? Visibility::Visible
+                                                     : Visibility::Collapsed);
+  shell.banner_action.Content(
+      box_value(running ? Tr(L"Annuler", L"Cancel") : Tr(L"Ouvrir", L"Open")));
+  if (running || entry.moving)
+    shell.banner_timer.Stop();
+  else
+    shell.banner_timer.Start();
+}
+
+void ShowBanner(DownloadEntry const& entry) {
+  ShellState& shell = *g_shell;
+  shell.banner_time = entry.time;
+  RefreshBanner(entry);
+  shell.banner.Visibility(Visibility::Visible);
+}
+
+void DownloadUpdated(DownloadEntry const& entry) {
+  ShellState& shell = *g_shell;
+  if (shell.banner_time == entry.time)
+    RefreshBanner(entry);
+  if (auto it = shell.download_details.find(entry.time);
+      it != shell.download_details.end()) {
+    it->second.Text(DownloadDetail(entry));
+  }
+}
+
+// Du dossier du profil vers Téléchargements, où le système choisit un nom
+// libre ; le fichier se retrouve ensuite par son jeton.
+fire_and_forget MoveToDownloads(long long time,
+                                std::wstring path,
+                                std::wstring name) {
+  std::wstring token;
+  std::wstring saved_name;
+  try {
+    auto source =
+        co_await Windows::Storage::StorageFile::GetFileFromPathAsync(path);
+    auto target = co_await Windows::Storage::DownloadsFolder::CreateFileAsync(
+        name, Windows::Storage::CreationCollisionOption::GenerateUniqueName);
+    co_await source.MoveAndReplaceAsync(target);
+    saved_name = target.Name();
+    token = StorageApplicationPermissions::FutureAccessList().Add(target);
+  } catch (hresult_error const& e) {
+    Note(L"coquille : téléchargement non déplacé",
+         static_cast<unsigned>(e.code().value));
+  } catch (...) {
+  }
+  co_await resume_foreground(g_shell->dispatcher);
+  DownloadEntry* entry = FindDownload(time);
+  if (!entry)
+    co_return;
+  entry->moving = false;
+  if (token.empty()) {
+    entry->state = RHENIUM_DOWNLOAD_FAILED;
+  } else {
+    entry->token = token;
+    entry->name = saved_name;
+    SaveDownloads();
+  }
+  DownloadUpdated(*entry);
+  if (DownloadsOpen())
+    RebuildDownloads();
+}
+
+// Au-delà de kMaxDownloads, les plus anciens terminés quittent la liste.
+void TrimDownloads() {
+  std::vector<DownloadEntry>& downloads = g_shell->downloads;
+  for (size_t i = 0; downloads.size() > kMaxDownloads && i < downloads.size();) {
+    if (downloads[i].state == RHENIUM_DOWNLOAD_IN_PROGRESS ||
+        downloads[i].moving) {
+      ++i;
+    } else {
+      ForgetDownload(downloads[i].time);
+    }
+  }
+}
+
+void OnDownloadChanged(void*,
+                       int id,
+                       int state,
+                       long long received,
+                       long long total,
+                       wchar_t const* name,
+                       wchar_t const* path) noexcept {
+  try {
+    ShellState& shell = *g_shell;
+    DownloadEntry* entry = FindDownloadById(id);
+    const bool added = !entry;
+    if (added) {
+      DownloadEntry download;
+      download.id = id;
+      download.time = Now();
+      shell.downloads.push_back(download);
+      TrimDownloads();
+      entry = FindDownload(download.time);
+      RheniumEngineNote(L"coquille : téléchargement");
+    }
+    if (entry->state == RHENIUM_DOWNLOAD_COMPLETE)
+      return;
+    const bool renamed = *name && entry->name != name;
+    if (renamed)
+      entry->name = CleanField(name);
+    entry->received = received;
+    entry->total = total;
+    entry->state = state;
+    if (state == RHENIUM_DOWNLOAD_COMPLETE) {
+      entry->moving = true;
+      MoveToDownloads(entry->time, path, entry->name);
+    }
+    if (added)
+      ShowBanner(*entry);
+    else
+      DownloadUpdated(*entry);
+    if (DownloadsOpen() && (added || renamed))
+      RebuildDownloads();
+  } catch (...) {
+  }
+}
+
+Button DownloadRow(DownloadEntry const& entry) {
+  Button row = ListItem(
+      DownloadName(entry), DownloadDetail(entry),
+      [time = entry.time] {
+        DownloadEntry* entry = FindDownload(time);
+        if (entry && !entry->token.empty())
+          OpenDownloadFile(entry->token);
+      },
+      [time = entry.time] {
+        MenuFlyout menu;
+        DownloadEntry* entry = FindDownload(time);
+        if (!entry)
+          return menu;
+        if (entry->state == RHENIUM_DOWNLOAD_IN_PROGRESS) {
+          MenuFlyoutItem cancel;
+          cancel.Text(Tr(L"Annuler", L"Cancel"));
+          cancel.Click([id = entry->id](auto&&, auto&&) {
+            RheniumEngineCancelDownload(id);
+          });
+          menu.Items().Append(cancel);
+          return menu;
+        }
+        if (!entry->token.empty()) {
+          MenuFlyoutItem remove_file;
+          remove_file.Text(Tr(L"Supprimer le fichier", L"Delete file"));
+          remove_file.Click([time, token = entry->token](auto&&, auto&&) {
+            DeleteDownloadFile(time, token);
+          });
+          menu.Items().Append(remove_file);
+        }
+        if (!entry->moving) {
+          MenuFlyoutItem forget;
+          forget.Text(Tr(L"Retirer de la liste", L"Remove from list"));
+          forget.Click([time](auto&&, auto&&) {
+            ForgetDownload(time);
+            RebuildDownloads();
+          });
+          menu.Items().Append(forget);
+        }
+        return menu;
+      });
+  g_shell->download_details.insert_or_assign(
+      entry.time,
+      row.Content().as<StackPanel>().Children().GetAt(1).as<TextBlock>());
+  return row;
+}
+
+// Du plus récent au plus ancien.
+void RebuildDownloads() {
+  ShellState& shell = *g_shell;
+  auto children = shell.download_list.Children();
+  children.Clear();
+  shell.download_details.clear();
+  if (shell.downloads.empty()) {
+    TextBlock empty = Label(Tr(L"Aucun téléchargement.", L"No downloads."), 15,
+                            kDimTextColor);
+    empty.Margin(Thickness{0, 16, 0, 0});
+    children.Append(empty);
+    return;
+  }
+  for (auto it = shell.downloads.rbegin(); it != shell.downloads.rend(); ++it)
+    children.Append(DownloadRow(*it));
+}
+
+void CloseDownloads() {
+  g_shell->downloads_panel.Visibility(Visibility::Collapsed);
+  g_shell->download_list.Children().Clear();
+  g_shell->download_details.clear();
+}
+
+void OpenDownloads() {
+  RebuildDownloads();
+  g_shell->downloads_panel.Visibility(Visibility::Visible);
+}
+
+Grid BuildDownloads() {
+  ShellState& shell = *g_shell;
+  HyperlinkButton clear;
+  clear.Content(box_value(Tr(L"Vider la liste", L"Clear list")));
+  clear.HorizontalAlignment(HorizontalAlignment::Right);
+  clear.Click([](auto&&, auto&&) {
+    std::vector<long long> finished;
+    for (DownloadEntry const& entry : g_shell->downloads) {
+      if (entry.state != RHENIUM_DOWNLOAD_IN_PROGRESS && !entry.moving)
+        finished.push_back(entry.time);
+    }
+    for (long long time : finished)
+      ForgetDownload(time);
+    RebuildDownloads();
+  });
+  Grid header;
+  header.Children().Append(PanelHeader(Tr(L"TÉLÉCHARGEMENTS", L"DOWNLOADS")));
+  header.Children().Append(clear);
+
+  TextBlock where = Label(Tr(L"Les fichiers sont enregistrés dans le dossier "
+                             L"Téléchargements du téléphone.",
+                             L"Files are saved to the phone's Downloads "
+                             L"folder."),
+                          13, kDimTextColor);
+  where.Margin(Thickness{0, 4, 0, 8});
+  shell.download_list = StackPanel();
+  StackPanel content;
+  content.Padding(Thickness{20, 12, 20, 24});
+  content.Children().Append(header);
+  content.Children().Append(where);
+  content.Children().Append(shell.download_list);
+  ScrollViewer scroll;
+  scroll.Content(content);
+  Grid downloads;
+  downloads.Background(Brush(kBarColor));
+  downloads.Children().Append(scroll);
+  downloads.Visibility(Visibility::Collapsed);
+  return downloads;
+}
+
+Grid BuildBanner() {
+  ShellState& shell = *g_shell;
+  shell.banner_name = Trimmed(Label(L"", 15));
+  shell.banner_detail = Trimmed(Label(L"", 12, kDimTextColor));
+  StackPanel text;
+  text.Background(Brush(Windows::UI::Colors::Transparent()));
+  text.VerticalAlignment(VerticalAlignment::Center);
+  text.Padding(Thickness{16, 0, 8, 0});
+  text.Children().Append(shell.banner_name);
+  text.Children().Append(shell.banner_detail);
+  text.Tapped([](auto&&, auto&&) {
+    HideBanner();
+    OpenDownloads();
+  });
+
+  shell.banner_action = FlatButton();
+  shell.banner_action.Height(kBarHeight);
+  shell.banner_action.Padding(Thickness{12, 0, 12, 0});
+  shell.banner_action.Foreground(Brush(AccentColor()));
+  shell.banner_action.Click([](auto&&, auto&&) {
+    DownloadEntry* entry = FindDownload(g_shell->banner_time);
+    if (!entry)
+      return;
+    if (entry->state == RHENIUM_DOWNLOAD_IN_PROGRESS) {
+      RheniumEngineCancelDownload(entry->id);
+    } else if (!entry->token.empty()) {
+      OpenDownloadFile(entry->token);
+      HideBanner();
+    }
+  });
+  Button close = FlatButton();
+  close.Width(kBarHeight);
+  close.Height(kBarHeight);
+  FontIcon cross = Glyph(kGlyphCancel);
+  cross.FontSize(12);
+  close.Content(cross);
+  close.Click([](auto&&, auto&&) { HideBanner(); });
+
+  shell.banner_progress = ProgressBar();
+  shell.banner_progress.Maximum(1);
+  shell.banner_progress.Height(2);
+  shell.banner_progress.MinHeight(2);
+  shell.banner_progress.Background(Brush(Windows::UI::Colors::Transparent()));
+  shell.banner_progress.VerticalAlignment(VerticalAlignment::Top);
+
+  Grid banner;
+  banner.Background(Brush(kMenuColor));
+  banner.Height(56);
+  banner.VerticalAlignment(VerticalAlignment::Bottom);
+  ColumnDefinition text_column;
+  text_column.Width(GridLength{1, GridUnitType::Star});
+  banner.ColumnDefinitions().Append(text_column);
+  for (int column = 1; column <= 2; ++column) {
+    ColumnDefinition button_column;
+    button_column.Width(GridLength{1, GridUnitType::Auto});
+    banner.ColumnDefinitions().Append(button_column);
+  }
+  Grid::SetColumn(shell.banner_action, 1);
+  Grid::SetColumn(close, 2);
+  Grid::SetColumnSpan(shell.banner_progress, 3);
+  banner.Children().Append(text);
+  banner.Children().Append(shell.banner_action);
+  banner.Children().Append(close);
+  banner.Children().Append(shell.banner_progress);
+  banner.Visibility(Visibility::Collapsed);
+
+  shell.banner_timer = DispatcherTimer();
+  shell.banner_timer.Interval(std::chrono::seconds(8));
+  shell.banner_timer.Tick([](auto&&, auto&&) { HideBanner(); });
+  return banner;
 }
 
 Grid BuildBar() {
@@ -1634,6 +2471,9 @@ UIElement BuildUi() {
   shell.settings = BuildSettings();
   shell.tabs = BuildTabs();
   shell.history = BuildHistory();
+  shell.favorites_panel = BuildFavorites();
+  shell.downloads_panel = BuildDownloads();
+  shell.banner = BuildBanner();
 
   Grid layout;
   RowDefinition content_row;
@@ -1647,13 +2487,16 @@ UIElement BuildUi() {
   for (UIElement const& child :
        {UIElement(shell.focus_sink), UIElement(shell.panel),
         UIElement(shell.input_surface), UIElement(bar),
-        UIElement(shell.dismiss_layer), UIElement(shell.menu),
-        UIElement(shell.tabs), UIElement(shell.history),
+        UIElement(shell.banner), UIElement(shell.dismiss_layer),
+        UIElement(shell.menu), UIElement(shell.tabs), UIElement(shell.history),
+        UIElement(shell.favorites_panel), UIElement(shell.downloads_panel),
         UIElement(shell.settings)}) {
     layout.Children().Append(child);
   }
-  for (Grid const& panel : {shell.tabs, shell.history, shell.settings})
+  for (Grid const& panel : {shell.tabs, shell.history, shell.favorites_panel,
+                            shell.downloads_panel, shell.settings}) {
     Grid::SetRowSpan(panel, 2);
+  }
 
   shell.root = Border();
   shell.root.Background(Brush(kBarColor));
@@ -1679,9 +2522,13 @@ void ApplyLanguage() {
   CloseMenu();
   replace(shell.menu, BuildMenu());
   replace(shell.history, BuildHistory());
+  replace(shell.favorites_panel, BuildFavorites());
+  replace(shell.downloads_panel, BuildDownloads());
   replace(shell.settings, BuildSettings());
-  for (Grid const& panel : {shell.history, shell.settings})
+  for (Grid const& panel : {shell.history, shell.favorites_panel,
+                            shell.downloads_panel, shell.settings}) {
     Grid::SetRowSpan(panel, 2);
+  }
   shell.address.PlaceholderText(
       Tr(L"Adresse ou recherche", L"Search or enter address"));
   shell.home_url.Text(home_text);
@@ -1716,6 +2563,10 @@ bool HandleBack() {
     CloseSettings();
   else if (IsShown(shell.history))
     CloseHistory();
+  else if (IsShown(shell.favorites_panel))
+    CloseFavorites();
+  else if (DownloadsOpen())
+    CloseDownloads();
   else if (TabsOpen())
     CloseTabs();
   else if (MenuOpen())
@@ -1754,6 +2605,8 @@ struct App : ApplicationT<App> {
       g_shell->engine_language = LanguageSetting();
       g_shell->engine_english = g_english;
       LoadHistory();
+      LoadFavorites();
+      LoadDownloads();
       // Fenêtre sur tout l'écran, marges posées par FitVisibleBounds.
       auto view = ApplicationView::GetForCurrentView();
       view.SetDesiredBoundsMode(

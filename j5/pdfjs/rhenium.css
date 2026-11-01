@@ -1,0 +1,15 @@
+/* Copyright 2026 Doalo
+ * Use of this source code is governed by a BSD-style license that can be
+ * found in the LICENSE file.
+ *
+ * Rhénium : ni impression, ni sélecteur de fichier, ni plein écran sur
+ * Windows 10 Mobile ; le lien de la page est dans la barre d'adresse.
+ */
+#printButton,
+#secondaryPrint,
+#secondaryOpenFile,
+#presentationMode,
+#viewBookmark,
+#editorModeButtons {
+  display: none !important;
+}

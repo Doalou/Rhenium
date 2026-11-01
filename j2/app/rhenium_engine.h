@@ -50,7 +50,20 @@ typedef struct RheniumHost {
   /* Langue des pages (Accept-Language), des extensions et des messages du
    * moteur : « fr-FR », « en-US »… NULL : celle du téléphone. */
   const wchar_t* language;
+  /* Téléchargement nouveau, en cours (quatre fois par seconde au plus) ou
+   * fini : état RHENIUM_DOWNLOAD_*, octets reçus et total (-1 s'il est
+   * inconnu), nom du fichier (vide tant qu'il n'est pas choisi) et, une fois
+   * terminé, son chemin dans LocalState, à déplacer par la coquille. */
+  void (*download_changed)(void* context, int id, int state,
+                           long long received, long long total,
+                           const wchar_t* name, const wchar_t* path);
 } RheniumHost;
+
+enum {
+  RHENIUM_DOWNLOAD_IN_PROGRESS = 0,
+  RHENIUM_DOWNLOAD_COMPLETE = 1,
+  RHENIUM_DOWNLOAD_FAILED = 2 /* interrompu ou annulé */
+};
 
 /* Journal de l'app (LocalState, recopié dans Phone\Downloads), à démarrer
  * dès wWinMain, et une ligne de la coquille. */
@@ -92,6 +105,10 @@ void RheniumEngineListTabs(void (*visit)(void* context, int id, int active,
 /* Demande un aperçu de l'onglet actif (rappel tab_thumbnail). Celui d'un
  * onglet qu'on quitte est pris tout seul. */
 void RheniumEngineCaptureTab(void);
+/* Mémoire critique : caches du moteur vidés et page de l'onglet inactif
+ * utilisé le moins récemment déchargée ; elle garde son historique et se
+ * recharge à son activation. 0 s'il n'y avait plus d'onglet à décharger. */
+int RheniumEngineDiscardTab(void);
 
 /* Popup ou page d'options de l'extension (uBlock Origin Lite), par-dessus la
  * page et fermés par GoBack ; 0 si aucune extension n'en a. */
@@ -118,6 +135,8 @@ int RheniumEngineWebStoreId(const wchar_t* url, char id[33]);
  * 0 si une autre installation est en cours. */
 int RheniumEngineInstallExtension(const char* id);
 
+void RheniumEngineCancelDownload(int id);
+
 /* Version de Chromium, par exemple « 116.0.5845.228 ». */
 const wchar_t* RheniumEngineChromiumVersion(void);
 
@@ -139,8 +158,15 @@ void RheniumEngineResize(float width_dip, float height_dip);
 /* Hauteur de la zone de contenu masquée par le clavier, en DIP : la page
  * fait défiler le champ focalisé au-dessus. */
 void RheniumEngineSetKeyboardInset(float bottom_dip);
-/* App visible ou masquée (écran d'accueil, verrouillage) : rendu suspendu. */
+/* App visible ou masquée (écran d'accueil, verrouillage) : rendu suspendu,
+ * et à la mise en arrière-plan, préférences, cookies et stockage des sites
+ * écrits tout de suite. */
 void RheniumEngineSetVisible(int visible);
+
+/* Efface cookies, cache et données des sites (pas celles des extensions),
+ * puis appelle `done` sur le thread UI. */
+void RheniumEngineClearBrowsingData(void (*done)(void* context),
+                                    void* context);
 
 #ifdef __cplusplus
 }

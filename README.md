@@ -6,7 +6,7 @@ Le navigateur intégré à Windows 10 Mobile repose sur EdgeHTML, figé depuis 2
 
 ## Où en est le projet
 
-Rhénium tourne sur un Lumia 950 : il affiche Wikipédia, YouTube et les sites courants dans leur version mobile, avec défilement et zoom tactiles, clavier virtuel et rotation. L'interface reprend celle d'Edge sur Windows 10 Mobile : l'adresse en bas de l'écran, un menu « … », plusieurs onglets avec leurs aperçus et l'historique, en français ou en anglais US. uBlock Origin Lite y est installé et actif dès le premier lancement.
+Rhénium tourne sur un Lumia 950 : il affiche Wikipédia, YouTube et les sites courants dans leur version mobile, avec défilement et zoom tactiles, clavier virtuel et rotation. L'interface reprend celle d'Edge sur Windows 10 Mobile : l'adresse en bas de l'écran, un menu « … », plusieurs onglets avec leurs aperçus, les favoris, l'historique, les téléchargements et une liseuse PDF, en français ou en anglais US. Les cookies et les données des sites sont gardés d'un lancement à l'autre. uBlock Origin Lite y est installé et actif dès le premier lancement.
 
 | Jalon | Contenu | État |
 | --- | --- | --- |
@@ -15,9 +15,9 @@ Rhénium tourne sur un Lumia 950 : il affiche Wikipédia, YouTube et les sites c
 | J2 · Moteur | `content_shell` en un seul processus, rendu logiciel, réseau et TLS | Atteint |
 | J3 · Navigation tactile | Coquille XAML, toucher, saisie, rotation, cache disque, agent utilisateur mobile | Atteint |
 | J4 · Extensions | Extensions Manifest V3, uBlock Origin Lite installé par défaut | Atteint |
-| J5 · v1 | Onglets, historique, favoris, téléchargements, profil persistant | À venir |
+| J5 · v1 | Onglets, historique, favoris, téléchargements, profil persistant, liseuse PDF | Atteint |
 
-La lecture vidéo marche aussi : YouTube en 360p avec le son (VP9 par libvpx, AAC par Media Foundation).
+La lecture vidéo marche aussi : YouTube avec le son, fluide en 360p comme en 720p (VP9 par libvpx, AAC par Media Foundation, mise à l'échelle par libyuv).
 
 Appareils visés : Lumia 950 et 950 XL en priorité (Windows 10 Mobile 1709), Lumia 650 et 640 au mieux.
 
@@ -44,6 +44,7 @@ Les modifications de Chromium sont gardées sous forme de correctifs (`patches\`
 | `j2\` | Moteur (`content_shell`), coquille XAML, empaquetage de l'app. Voir `j2\README.md` |
 | `j3\` | Notes du jalon de navigation tactile. Voir `j3\README.md` |
 | `j4\` | Extensions et uBlock Origin Lite (récupération, licence, notes). Voir `j4\README.md` |
+| `j5\` | Jalon v1 : notes (profil, favoris, téléchargements, liseuse PDF) et `fetch-pdfjs.ps1`, qui prépare PDF.js. Voir `j5\README.md` |
 
 Non versionnés, recréés par les scripts : `chromium\` (`j1-base\fetch.ps1`, `j2\fetch.ps1`), `toolchains\` (jonction vers LLVM, gn et ninja), les dossiers `out\` (dont uBO Lite, `j4\out\ubol`), `sonde\certs\` et `v8\` (`j1\fetch.ps1`, V8 autonome des essais de J1, inutile à l'app).
 

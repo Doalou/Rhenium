@@ -203,6 +203,56 @@ index afaddf1969..a529269927 100644
    }
  
    if (is_apple) {
+diff --git a/components/download/internal/common/base_file_win.cc b/components/download/internal/common/base_file_win.cc
+index afc97218f7..3fad85c3ab 100644
+--- a/components/download/internal/common/base_file_win.cc
++++ b/components/download/internal/common/base_file_win.cc
+@@ -12,12 +12,15 @@
+ #include <wrl/client.h>
+ #include <wrl/implements.h>
+ 
++#include "base/files/file_util.h"
++#include "base/logging.h"
+ #include "base/threading/scoped_blocking_call.h"
+ #include "base/win/com_init_util.h"
+ #include "components/download/public/common/download_interrupt_reasons_utils.h"
+ #include "components/download/public/common/download_stats.h"
+ 
+ namespace download {
++#if !defined(WINUWP)
+ namespace {
+ 
+ // By and large the errors seen here are listed in sherrors.h, included from
+@@ -236,6 +239,7 @@ class FileOperationProgressSink
+ };
+ 
+ }  // namespace
++#endif  // !defined(WINUWP)
+ 
+ // Renames a file using IFileOperation::MoveItem() to ensure that the target
+ // file gets the correct default security descriptor in the new path.
+@@ -245,6 +249,13 @@ DownloadInterruptReason BaseFile::MoveFileAndAdjustPermissions(
+   base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
+                                                 base::BlockingType::MAY_BLOCK);
+ 
++#if defined(WINUWP)
++  // Rhénium : IFileOperation (shell32) n'existe pas pour les apps UWP. Le
++  // fichier reste dans le dossier de l'app, qui le déplace ensuite.
++  if (!base::Move(full_path_, new_path))
++    return LogSystemError("Move", logging::GetLastSystemErrorCode());
++  return DOWNLOAD_INTERRUPT_REASON_NONE;
++#else
+   base::win::AssertComInitialized();
+   Microsoft::WRL::ComPtr<IShellItem> original_path;
+   HRESULT hr = SHCreateItemFromParsingName(full_path_.value().c_str(), nullptr,
+@@ -304,6 +315,7 @@ DownloadInterruptReason BaseFile::MoveFileAndAdjustPermissions(
+   }
+ 
+   return interrupt_reason;
++#endif
+ }
+ 
+ }  // namespace download
 diff --git a/components/metrics/component_metrics_provider.cc b/components/metrics/component_metrics_provider.cc
 index bf7b04add7..03ea2c6995 100644
 --- a/components/metrics/component_metrics_provider.cc
@@ -473,6 +523,115 @@ index ef3c8ba80d..aaee553024 100644
    }
  
    if (is_fuchsia) {
+diff --git a/components/viz/service/display/software_renderer.cc b/components/viz/service/display/software_renderer.cc
+index bf2f4220f0..2e618af874 100644
+--- a/components/viz/service/display/software_renderer.cc
++++ b/components/viz/service/display/software_renderer.cc
+@@ -9,6 +9,7 @@
+ #include <vector>
+ 
+ #include "base/memory/raw_ptr.h"
++#include "base/no_destructor.h"
+ #include "base/process/memory.h"
+ #include "base/trace_event/trace_event.h"
+ #include "build/build_config.h"
+@@ -35,12 +36,15 @@
+ #include "skia/ext/image_operations.h"
+ #include "skia/ext/legacy_display_globals.h"
+ #include "skia/ext/opacity_filter_canvas.h"
++#include "third_party/libyuv/include/libyuv/scale_argb.h"
++#include "third_party/skia/include/core/SkBitmap.h"
+ #include "third_party/skia/include/core/SkCanvas.h"
+ #include "third_party/skia/include/core/SkColor.h"
+ #include "third_party/skia/include/core/SkImage.h"
+ #include "third_party/skia/include/core/SkImageFilter.h"
+ #include "third_party/skia/include/core/SkMatrix.h"
+ #include "third_party/skia/include/core/SkPath.h"
++#include "third_party/skia/include/core/SkPixmap.h"
+ #include "third_party/skia/include/core/SkPoint.h"
+ #include "third_party/skia/include/core/SkShader.h"
+ #include "third_party/skia/include/core/SkSwizzle.h"
+@@ -100,6 +104,66 @@ bool SoftwareRenderer::CanPartialSwap() {
+   return true;
+ }
+ 
++#if defined(WINUWP)
++namespace {
++// Rhénium : Skia agrandit une image vidéo de 640x360 à l'écran en 30 ms sur
++// le Lumia 950. libyuv (NEON) la met à la taille de l'écran en quelques
++// millisecondes, et Skia n'a plus qu'à la recopier. L'image mise à l'échelle
++// est gardée tant que la vidéo et sa place ne changent pas.
++struct ScaledVideo {
++  SkBitmap bitmap;
++  uint32_t image_id = 0;
++  SkIRect source;
++};
++
++bool DrawScaledVideo(SkCanvas* canvas,
++                     const SkImage* image,
++                     const SkRect& source_rect,
++                     const SkRect& quad_rect,
++                     const SkPaint& paint) {
++  static base::NoDestructor<ScaledVideo> cache;
++  const SkMatrix& matrix = canvas->getTotalMatrix();
++  if (!matrix.isScaleTranslate())
++    return false;
++  const SkIRect target = matrix.mapRect(quad_rect).round();
++  const SkIRect source = source_rect.round();
++  SkPixmap pixels;
++  if (target.isEmpty() || source.isEmpty() || target.width() > 4096 ||
++      target.height() > 4096 || !image->peekPixels(&pixels) ||
++      pixels.info().bytesPerPixel() != 4 ||
++      !SkIRect::MakeSize(pixels.dimensions()).contains(source)) {
++    return false;
++  }
++  SkBitmap& scaled = cache->bitmap;
++  const bool resized = scaled.width() != target.width() ||
++                       scaled.height() != target.height() ||
++                       scaled.colorType() != pixels.colorType();
++  if (resized && !scaled.tryAllocPixels(pixels.info().makeWH(
++                     target.width(), target.height()))) {
++    scaled.reset();
++    return false;
++  }
++  if (resized || cache->image_id != image->uniqueID() ||
++      cache->source != source) {
++    libyuv::ARGBScale(
++        static_cast<const uint8_t*>(pixels.addr(source.x(), source.y())),
++        static_cast<int>(pixels.rowBytes()), source.width(), source.height(),
++        static_cast<uint8_t*>(scaled.getPixels()),
++        static_cast<int>(scaled.rowBytes()), target.width(), target.height(),
++        libyuv::kFilterBilinear);
++    cache->image_id = image->uniqueID();
++    cache->source = source;
++  }
++  SkAutoCanvasRestore restore(canvas, /*doSave=*/true);
++  canvas->resetMatrix();
++  canvas->drawImage(
++      SkImages::RasterFromPixmap(scaled.pixmap(), nullptr, nullptr),
++      target.x(), target.y(), SkSamplingOptions(), &paint);
++  return true;
++}
++}  // namespace
++#endif
++
+ void SoftwareRenderer::BeginDrawingFrame() {
+   TRACE_EVENT0("viz", "SoftwareRenderer::BeginDrawingFrame");
+ }
+@@ -469,6 +533,13 @@ void SoftwareRenderer::DrawTextureQuad(const TextureDrawQuad* quad) {
+   }
+   SkSamplingOptions sampling(quad->nearest_neighbor ? SkFilterMode::kNearest
+                                                     : SkFilterMode::kLinear);
++#if defined(WINUWP)
++  if (quad->is_video_frame && !quad->y_flipped && !needs_layer &&
++      DrawScaledVideo(current_canvas_, image, sk_uv_rect, quad_rect,
++                      current_paint_)) {
++    return;
++  }
++#endif
+   current_canvas_->drawImageRect(image, sk_uv_rect, quad_rect, sampling,
+                                  &current_paint_,
+                                  SkCanvas::kStrict_SrcRectConstraint);
 diff --git a/components/viz/service/display_embedder/output_surface_provider_impl.cc b/components/viz/service/display_embedder/output_surface_provider_impl.cc
 index 0bc450ca4f..e46d495f21 100644
 --- a/components/viz/service/display_embedder/output_surface_provider_impl.cc
@@ -501,10 +660,10 @@ index 0bc450ca4f..e46d495f21 100644
  #elif BUILDFLAG(IS_APPLE)
 diff --git a/components/viz/service/display_embedder/software_output_device_uwp.cc b/components/viz/service/display_embedder/software_output_device_uwp.cc
 new file mode 100644
-index 0000000000..fcb729695e
+index 0000000000..916890c75d
 --- /dev/null
 +++ b/components/viz/service/display_embedder/software_output_device_uwp.cc
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,201 @@
 +// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -519,6 +678,10 @@ index 0000000000..fcb729695e
 +#include "ui/gfx/win/uwp_core_window.h"
 +
 +namespace viz {
++
++namespace {
++constexpr int kMeasuredFrames = 120;
++}  // namespace
 +
 +using Microsoft::WRL::ComPtr;
 +
@@ -618,8 +781,39 @@ index 0000000000..fcb729695e
 +  return true;
 +}
 +
++SkCanvas* SoftwareOutputDeviceUwp::BeginPaint(const gfx::Rect& damage_rect) {
++  paint_start_ = base::TimeTicks::Now();
++  return SoftwareOutputDevice::BeginPaint(damage_rect);
++}
++
++// Dessin par Skia, copie vers le GPU et présentation (attente de la
++// synchronisation verticale comprise), et cadence obtenue.
++void SoftwareOutputDeviceUwp::Measure(base::TimeTicks paint_end,
++                                      base::TimeTicks copy_end) {
++  const base::TimeTicks now = base::TimeTicks::Now();
++  if (period_start_.is_null())
++    period_start_ = paint_start_;
++  paint_total_ += paint_end - paint_start_;
++  copy_total_ += copy_end - paint_end;
++  present_total_ += now - copy_end;
++  if (++frames_ < kMeasuredFrames)
++    return;
++  const double fps = frames_ / (now - period_start_).InSecondsF();
++  LOG(INFO) << "Rhenium : " << frames_ << " images à " << fps
++            << " im/s, dessin " << (paint_total_ / frames_).InMillisecondsF()
++            << " ms, copie " << (copy_total_ / frames_).InMillisecondsF()
++            << " ms (" << copied_pixels_ / frames_ / 1000
++            << " kpx), présentation "
++            << (present_total_ / frames_).InMillisecondsF() << " ms";
++  frames_ = 0;
++  copied_pixels_ = 0;
++  paint_total_ = copy_total_ = present_total_ = base::TimeDelta();
++  period_start_ = now;
++}
++
 +void SoftwareOutputDeviceUwp::EndPaint() {
 +  SoftwareOutputDevice::EndPaint();
++  const base::TimeTicks paint_end = base::TimeTicks::Now();
 +  SkPixmap pixmap;
 +  if (!surface_ || !surface_->peekPixels(&pixmap) || !EnsureSwapChain())
 +    return;
@@ -650,10 +844,14 @@ index 0000000000..fcb729695e
 +    context_->UpdateSubresource(back_buffer.Get(), 0, &box,
 +                                pixmap.addr32(copy.x(), copy.y()),
 +                                static_cast<UINT>(pixmap.rowBytes()), 0);
++    copied_pixels_ += copy.size().GetArea();
 +  }
++  const base::TimeTicks copy_end = base::TimeTicks::Now();
 +  const HRESULT hr = swap_chain_->Present(1, 0);
-+  if (SUCCEEDED(hr))
++  if (SUCCEEDED(hr)) {
++    Measure(paint_end, copy_end);
 +    return;
++  }
 +  LOG(ERROR) << "Present : " << std::hex << hr;
 +  // Périphérique perdu : tout est recréé à l'image suivante. Sinon, plus de
 +  // tentative.
@@ -669,10 +867,10 @@ index 0000000000..fcb729695e
 +}  // namespace viz
 diff --git a/components/viz/service/display_embedder/software_output_device_uwp.h b/components/viz/service/display_embedder/software_output_device_uwp.h
 new file mode 100644
-index 0000000000..9459bde17f
+index 0000000000..4ceccd8bbf
 --- /dev/null
 +++ b/components/viz/service/display_embedder/software_output_device_uwp.h
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,57 @@
 +// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -684,6 +882,7 @@ index 0000000000..9459bde17f
 +#include <dxgi1_3.h>
 +#include <wrl/client.h>
 +
++#include "base/time/time.h"
 +#include "components/viz/service/display/software_output_device.h"
 +#include "components/viz/service/viz_service_export.h"
 +
@@ -701,10 +900,12 @@ index 0000000000..9459bde17f
 +  ~SoftwareOutputDeviceUwp() override;
 +
 +  // SoftwareOutputDevice:
++  SkCanvas* BeginPaint(const gfx::Rect& damage_rect) override;
 +  void EndPaint() override;
 +
 + private:
 +  bool EnsureSwapChain();
++  void Measure(base::TimeTicks paint_end, base::TimeTicks copy_end);
 +
 +  Microsoft::WRL::ComPtr<ID3D11Device> device_;
 +  Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
@@ -713,6 +914,15 @@ index 0000000000..9459bde17f
 +  gfx::Rect previous_damage_;
 +  int fresh_buffers_ = 0;  // présentations encore à faire en entier
 +  bool failed_ = false;
++
++  // Mesures écrites dans le journal toutes les kMeasuredFrames images.
++  base::TimeTicks paint_start_;
++  base::TimeTicks period_start_;
++  base::TimeDelta paint_total_;
++  base::TimeDelta copy_total_;
++  base::TimeDelta present_total_;
++  int64_t copied_pixels_ = 0;
++  int frames_ = 0;
 +};
 +
 +}  // namespace viz
@@ -1125,7 +1335,7 @@ index bbe8635423..ab7732a88e 100644
  #endif
    void TitleWasSet(NavigationEntry* entry) override;
 diff --git a/content/shell/browser/shell_content_browser_client.cc b/content/shell/browser/shell_content_browser_client.cc
-index 46baba32a0..b56a4c29c1 100644
+index 46baba32a0..b6afe9bb8b 100644
 --- a/content/shell/browser/shell_content_browser_client.cc
 +++ b/content/shell/browser/shell_content_browser_client.cc
 @@ -6,6 +6,10 @@
@@ -1209,7 +1419,7 @@ index 46baba32a0..b56a4c29c1 100644
  }
  
  blink::UserAgentMetadata ShellContentBrowserClient::GetUserAgentMetadata() {
-@@ -732,6 +776,15 @@ void ShellContentBrowserClient::ConfigureNetworkContextParamsForShell(
+@@ -732,6 +776,28 @@ void ShellContentBrowserClient::ConfigureNetworkContextParamsForShell(
            "cors_exempt_header_list");
    if (!exempt_header.empty())
      context_params->cors_exempt_header_list.push_back(exempt_header);
@@ -1220,11 +1430,59 @@ index 46baba32a0..b56a4c29c1 100644
 +    context_params->http_cache_directory = network::TransferableDirectory(
 +        context->GetPath().Append(FILE_PATH_LITERAL("Cache")));
 +    context_params->http_cache_max_size = 64 * 1024 * 1024;
++    // Profil persistant : cookies et HSTS sur disque, cookies de session
++    // compris (W10M tue l'app sans prévenir). Pas de chiffrement : OSCrypt
++    // n'est pas initialisé, et le dossier de l'app est déjà privé.
++    context_params->file_paths = network::mojom::NetworkContextFilePaths::New();
++    context_params->file_paths->data_directory =
++        network::TransferableDirectory(context->GetPath());
++    context_params->file_paths->cookie_database_name =
++        base::FilePath(FILE_PATH_LITERAL("Cookies"));
++    context_params->file_paths->transport_security_persister_file_name =
++        base::FilePath(FILE_PATH_LITERAL("TransportSecurity"));
++    context_params->enable_encrypted_cookies = false;
++    context_params->persist_session_cookies = true;
++    context_params->restore_old_session_cookies = true;
 +  }
 +#endif
  }
  
  void ShellContentBrowserClient::GetHyphenationDictionary(
+diff --git a/content/shell/browser/shell_download_manager_delegate.cc b/content/shell/browser/shell_download_manager_delegate.cc
+index 5ef6ff769d..eb2099ec6e 100644
+--- a/content/shell/browser/shell_download_manager_delegate.cc
++++ b/content/shell/browser/shell_download_manager_delegate.cc
+@@ -129,6 +129,14 @@ void ShellDownloadManagerDelegate::GenerateFilename(
+     base::CreateDirectory(suggested_directory);
+ 
+   base::FilePath suggested_path(suggested_directory.Append(generated_name));
++#if defined(WINUWP)
++  // Rhénium : dossier de passage, vidé par l'app qui déplace chaque fichier
++  // terminé dans Téléchargements ; deux fichiers du même nom peuvent s'y
++  // croiser.
++  const base::FilePath unique = base::GetUniquePath(suggested_path);
++  if (!unique.empty())
++    suggested_path = unique;
++#endif
+   GetUIThreadTaskRunner({})->PostTask(
+       FROM_HERE, base::BindOnce(std::move(callback), suggested_path));
+ }
+@@ -138,7 +146,14 @@ void ShellDownloadManagerDelegate::OnDownloadPathGenerated(
+     DownloadTargetCallback callback,
+     const base::FilePath& suggested_path) {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+-  if (suppress_prompting_) {
++#if defined(WINUWP)
++  // Rhénium : pas de boîte d'enregistrement (GetSaveFileName n'existe pas
++  // sous UWP), l'app reprend le fichier une fois terminé.
++  const bool prompt = false;
++#else
++  const bool prompt = !suppress_prompting_;
++#endif
++  if (!prompt) {
+     // Testing exit.
+     std::move(callback).Run(
+         suggested_path, download::DownloadItem::TARGET_DISPOSITION_OVERWRITE,
 diff --git a/content/shell/browser/shell_platform_data_aura.cc b/content/shell/browser/shell_platform_data_aura.cc
 index 72b880eb84..2f6278519e 100644
 --- a/content/shell/browser/shell_platform_data_aura.cc
@@ -1351,10 +1609,10 @@ index 3744a23f0e..16d56e2c68 100644
    void LoadProgressChanged(Shell* shell, double progress);
  #endif
 diff --git a/content/shell/browser/shell_platform_delegate_aura.cc b/content/shell/browser/shell_platform_delegate_aura.cc
-index 1831839cda..042bcdce95 100644
+index 1831839cda..961326be30 100644
 --- a/content/shell/browser/shell_platform_delegate_aura.cc
 +++ b/content/shell/browser/shell_platform_delegate_aura.cc
-@@ -13,8 +13,91 @@
+@@ -13,8 +13,94 @@
  #include "ui/aura/window.h"
  #include "ui/aura/window_event_dispatcher.h"
  
@@ -1365,6 +1623,7 @@ index 1831839cda..042bcdce95 100644
 +#include "base/strings/utf_string_conversions.h"
 +#include "content/public/browser/navigation_controller.h"
 +#include "content/shell/browser/shell_uwp_host.h"
++#include "url/gurl.h"
 +#endif
 +
  namespace content {
@@ -1393,8 +1652,10 @@ index 1831839cda..042bcdce95 100644
 +void NotifyUrl(Shell* shell) {
 +  const ShellUwpHost& host = GetUwpHost();
 +  if (host.url_changed) {
-+    const std::wstring wide =
-+        base::UTF8ToWide(shell->web_contents()->GetVisibleURL().spec());
++    GURL url = shell->web_contents()->GetVisibleURL();
++    if (host.displayed_url)
++      url = host.displayed_url(url);
++    const std::wstring wide = base::UTF8ToWide(url.spec());
 +    host.url_changed(host.context, wide.c_str());
 +  }
 +}
@@ -1446,7 +1707,7 @@ index 1831839cda..042bcdce95 100644
  struct ShellPlatformDelegate::ShellData {
    gfx::NativeWindow window;
  };
-@@ -56,6 +139,10 @@ gfx::NativeWindow ShellPlatformDelegate::GetNativeWindow(Shell* shell) {
+@@ -56,6 +142,10 @@ gfx::NativeWindow ShellPlatformDelegate::GetNativeWindow(Shell* shell) {
  void ShellPlatformDelegate::CleanUp(Shell* shell) {
    DCHECK(base::Contains(shell_data_map_, shell));
    shell_data_map_.erase(shell);
@@ -1457,7 +1718,7 @@ index 1831839cda..042bcdce95 100644
  }
  
  void ShellPlatformDelegate::SetContents(Shell* shell) {
-@@ -65,6 +152,10 @@ void ShellPlatformDelegate::SetContents(Shell* shell) {
+@@ -65,6 +155,10 @@ void ShellPlatformDelegate::SetContents(Shell* shell) {
      parent->AddChild(content);
  
    content->Show();
@@ -1468,7 +1729,7 @@ index 1831839cda..042bcdce95 100644
  }
  
  void ShellPlatformDelegate::ResizeWebContent(Shell* shell,
-@@ -76,12 +167,30 @@ void ShellPlatformDelegate::EnableUIControl(Shell* shell,
+@@ -76,12 +170,30 @@ void ShellPlatformDelegate::EnableUIControl(Shell* shell,
                                              UIControl control,
                                              bool is_enabled) {}
  
@@ -1502,7 +1763,7 @@ index 1831839cda..042bcdce95 100644
  
  void ShellPlatformDelegate::MainFrameCreated(Shell* shell) {}
  
-@@ -89,4 +198,14 @@ bool ShellPlatformDelegate::DestroyShell(Shell* shell) {
+@@ -89,4 +201,14 @@ bool ShellPlatformDelegate::DestroyShell(Shell* shell) {
    return false;  // Shell destroys itself.
  }
  
@@ -1519,16 +1780,18 @@ index 1831839cda..042bcdce95 100644
  }  // namespace content
 diff --git a/content/shell/browser/shell_uwp_host.h b/content/shell/browser/shell_uwp_host.h
 new file mode 100644
-index 0000000000..62552307d6
+index 0000000000..38feab6593
 --- /dev/null
 +++ b/content/shell/browser/shell_uwp_host.h
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,49 @@
 +// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
 +#ifndef CONTENT_SHELL_BROWSER_SHELL_UWP_HOST_H_
 +#define CONTENT_SHELL_BROWSER_SHELL_UWP_HOST_H_
++
++class GURL;
 +
 +namespace content {
 +
@@ -1544,6 +1807,8 @@ index 0000000000..62552307d6
 +                          int can_go_forward) = nullptr;
 +  void (*title_changed)(void* context, const wchar_t* title) = nullptr;
 +  void (*progress_changed)(void* context, double progress) = nullptr;
++  // Adresse montrée pour celle de la page (liseuse PDF : celle du PDF).
++  GURL (*displayed_url)(const GURL& url) = nullptr;
 +};
 +
 +void SetShellUwpHost(const ShellUwpHost& host);
@@ -2025,10 +2290,10 @@ index 6358254fc2..aafeb98a93 100644
  
 diff --git a/extensions/rhenium/BUILD.gn b/extensions/rhenium/BUILD.gn
 new file mode 100644
-index 0000000000..2c583565e8
+index 0000000000..48b5455b1a
 --- /dev/null
 +++ b/extensions/rhenium/BUILD.gn
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,97 @@
 +# Copyright 2026 Doalo
 +# Use of this source code is governed by a BSD-style license that can be
 +# found in the LICENSE file.
@@ -2045,6 +2310,8 @@ index 0000000000..2c583565e8
 +source_set("rhenium") {
 +  testonly = true  # content_shell_lib
 +  sources = [
++    "rhenium_downloads.cc",
++    "rhenium_downloads.h",
 +    "rhenium_extension_manager.cc",
 +    "rhenium_extension_manager.h",
 +    "rhenium_extension_system.cc",
@@ -2055,6 +2322,8 @@ index 0000000000..2c583565e8
 +    "rhenium_extensions_client.h",
 +    "rhenium_l10n_message_filter.cc",
 +    "rhenium_l10n_message_filter.h",
++    "rhenium_pdf.cc",
++    "rhenium_pdf.h",
 +    "rhenium_main_delegate.cc",
 +    "rhenium_main_delegate.h",
 +    "rhenium_permissions_api.cc",
@@ -2071,6 +2340,7 @@ index 0000000000..2c583565e8
 +  deps = [
 +    "//base",
 +    "//components/crx_file",
++    "//components/download/public/common:public",
 +    "//components/keyed_service/content",
 +    "//components/pref_registry",
 +    "//components/prefs",
@@ -2908,6 +3178,205 @@ index 0000000000..c235014c6c
 +    ]
 +  }
 +]
+diff --git a/extensions/rhenium/rhenium_downloads.cc b/extensions/rhenium/rhenium_downloads.cc
+new file mode 100644
+index 0000000000..1062277604
+--- /dev/null
++++ b/extensions/rhenium/rhenium_downloads.cc
+@@ -0,0 +1,140 @@
++// Copyright 2026 Doalo
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "extensions/rhenium/rhenium_downloads.h"
++
++#include <map>
++
++#include "base/files/file_path.h"
++#include "base/logging.h"
++#include "base/memory/raw_ptr.h"
++#include "base/no_destructor.h"
++#include "base/time/time.h"
++#include "components/download/public/common/download_interrupt_reasons.h"
++#include "components/download/public/common/download_item.h"
++#include "content/public/browser/browser_context.h"
++#include "content/public/browser/download_manager.h"
++
++namespace rhenium {
++
++namespace {
++
++constexpr base::TimeDelta kProgressInterval = base::Milliseconds(250);
++
++DownloadObserver& ShellObserver() {
++  static DownloadObserver observer;
++  return observer;
++}
++
++int StateOf(const download::DownloadItem& item) {
++  switch (item.GetState()) {
++    case download::DownloadItem::COMPLETE:
++      return kDownloadComplete;
++    case download::DownloadItem::CANCELLED:
++    case download::DownloadItem::INTERRUPTED:
++      return kDownloadFailed;
++    default:
++      return kDownloadInProgress;
++  }
++}
++
++class Watcher : public content::DownloadManager::Observer,
++                public download::DownloadItem::Observer {
++ public:
++  void Watch(content::DownloadManager* manager) {
++    manager_ = manager;
++    manager->AddObserver(this);
++  }
++
++  void Cancel(int id) {
++    if (!manager_)
++      return;
++    if (download::DownloadItem* item = manager_->GetDownload(id))
++      item->Cancel(/*user_cancel=*/true);
++  }
++
++  // content::DownloadManager::Observer
++  void OnDownloadCreated(content::DownloadManager*,
++                         download::DownloadItem* item) override {
++    item->AddObserver(this);
++    Report(item);
++  }
++
++  void ManagerGoingDown(content::DownloadManager* manager) override {
++    manager->RemoveObserver(this);
++    manager_ = nullptr;
++  }
++
++  // download::DownloadItem::Observer
++  void OnDownloadUpdated(download::DownloadItem* item) override {
++    Report(item);
++  }
++
++  void OnDownloadDestroyed(download::DownloadItem* item) override {
++    item->RemoveObserver(this);
++    reported_.erase(item->GetId());
++  }
++
++ private:
++  struct Reported {
++    int state;
++    bool named;
++    base::TimeTicks time;
++  };
++
++  // Chaque changement d'état ou de nom ; l'avancement, par intervalles.
++  void Report(download::DownloadItem* item) {
++    const int state = StateOf(*item);
++    const base::FilePath target = item->GetTargetFilePath();
++    const bool named = !target.empty();
++    const base::TimeTicks now = base::TimeTicks::Now();
++    auto it = reported_.find(item->GetId());
++    if (it != reported_.end() && it->second.state == state &&
++        it->second.named == named &&
++        (state != kDownloadInProgress ||
++         now - it->second.time < kProgressInterval)) {
++      return;
++    }
++    reported_[item->GetId()] = {state, named, now};
++    if (state == kDownloadFailed) {
++      LOG(WARNING) << "Rhenium : téléchargement interrompu, "
++                   << download::DownloadInterruptReasonToString(
++                          item->GetLastReason());
++    }
++    DownloadObserver& observer = ShellObserver();
++    if (!observer.download_changed)
++      return;
++    observer.download_changed(
++        observer.context, static_cast<int>(item->GetId()), state,
++        item->GetReceivedBytes(), item->GetTotalBytes() > 0
++                                      ? item->GetTotalBytes()
++                                      : -1,
++        target.BaseName().value().c_str(),
++        state == kDownloadComplete ? target.value().c_str() : L"");
++  }
++
++  raw_ptr<content::DownloadManager> manager_ = nullptr;
++  std::map<uint32_t, Reported> reported_;
++};
++
++Watcher& GetWatcher() {
++  static base::NoDestructor<Watcher> watcher;
++  return *watcher;
++}
++
++}  // namespace
++
++void InitDownloads(const DownloadObserver& observer) {
++  ShellObserver() = observer;
++}
++
++void WatchDownloads(content::BrowserContext* context) {
++  GetWatcher().Watch(context->GetDownloadManager());
++}
++
++void CancelDownload(int id) {
++  GetWatcher().Cancel(id);
++}
++
++}  // namespace rhenium
+diff --git a/extensions/rhenium/rhenium_downloads.h b/extensions/rhenium/rhenium_downloads.h
+new file mode 100644
+index 0000000000..4493d840e6
+--- /dev/null
++++ b/extensions/rhenium/rhenium_downloads.h
+@@ -0,0 +1,47 @@
++// Copyright 2026 Doalo
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef EXTENSIONS_RHENIUM_RHENIUM_DOWNLOADS_H_
++#define EXTENSIONS_RHENIUM_RHENIUM_DOWNLOADS_H_
++
++#include <stdint.h>
++
++namespace content {
++class BrowserContext;
++}
++
++namespace rhenium {
++
++// Téléchargements : enregistrés sans question dans le dossier Downloads du
++// profil (ShellDownloadManagerDelegate sous WINUWP), suivis ici pour la
++// coquille, qui déplace chaque fichier terminé dans Téléchargements. Tout
++// s'appelle sur le thread UI.
++enum DownloadState {
++  kDownloadInProgress = 0,
++  kDownloadComplete = 1,
++  kDownloadFailed = 2,  // interrompu ou annulé
++};
++
++struct DownloadObserver {
++  void* context = nullptr;
++  // Nouveau téléchargement, avancement (quatre fois par seconde au plus) ou
++  // fin. `total` vaut -1 si la taille est inconnue ; `name` est vide tant que
++  // le nom n'est pas choisi ; `path`, le fichier terminé.
++  void (*download_changed)(void* context,
++                           int id,
++                           int state,
++                           int64_t received,
++                           int64_t total,
++                           const wchar_t* name,
++                           const wchar_t* path) = nullptr;
++};
++
++void InitDownloads(const DownloadObserver& observer);
++// Une fois le contexte du profil créé.
++void WatchDownloads(content::BrowserContext* context);
++void CancelDownload(int id);
++
++}  // namespace rhenium
++
++#endif  // EXTENSIONS_RHENIUM_RHENIUM_DOWNLOADS_H_
 diff --git a/extensions/rhenium/rhenium_extension_manager.cc b/extensions/rhenium/rhenium_extension_manager.cc
 new file mode 100644
 index 0000000000..377aa5b313
@@ -5205,10 +5674,10 @@ index 0000000000..9b280c2dce
 +#endif  // EXTENSIONS_RHENIUM_RHENIUM_L10N_MESSAGE_FILTER_H_
 diff --git a/extensions/rhenium/rhenium_main_delegate.cc b/extensions/rhenium/rhenium_main_delegate.cc
 new file mode 100644
-index 0000000000..087b6b4285
+index 0000000000..5e977a2fcb
 --- /dev/null
 +++ b/extensions/rhenium/rhenium_main_delegate.cc
-@@ -0,0 +1,624 @@
+@@ -0,0 +1,640 @@
 +// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -5282,11 +5751,13 @@ index 0000000000..087b6b4285
 +#include "extensions/renderer/extension_web_view_helper.h"
 +#include "extensions/renderer/extensions_renderer_client.h"
 +#include "extensions/renderer/renderer_extension_registry.h"
++#include "extensions/rhenium/rhenium_downloads.h"
 +#include "extensions/rhenium/rhenium_extension_manager.h"
 +#include "extensions/rhenium/rhenium_extension_system.h"
 +#include "extensions/rhenium/rhenium_extensions_browser_client.h"
 +#include "extensions/rhenium/rhenium_extensions_client.h"
 +#include "extensions/rhenium/rhenium_l10n_message_filter.h"
++#include "extensions/rhenium/rhenium_pdf.h"
 +#include "extensions/rhenium/rhenium_tab_model.h"
 +#include "third_party/blink/public/common/associated_interfaces/associated_interface_registry.h"
 +#include "third_party/blink/public/mojom/window_features/window_features.mojom.h"
@@ -5426,6 +5897,7 @@ index 0000000000..087b6b4285
 +    }
 +    system->FinishInitialization();
 +    SetExtensionContext(context);
++    WatchDownloads(context);
 +    // Après la première page, pour ne pas la ralentir.
 +    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
 +        FROM_HERE, base::BindOnce(&WakeServiceWorkers, base::Unretained(context)),
@@ -5568,7 +6040,20 @@ index 0000000000..087b6b4285
 +            navigation_handle);
 +    throttles.push_back(std::make_unique<extensions::ExtensionNavigationThrottle>(
 +        navigation_handle));
++    if (auto pdf = rhenium::MaybeCreatePdfThrottle(navigation_handle))
++      throttles.push_back(std::move(pdf));
 +    return throttles;
++  }
++
++  // Comme Chrome : les cookies SameSite accompagnent les requêtes d'une page
++  // d'extension, celles de la liseuse PDF par exemple.
++  bool ShouldTreatURLSchemeAsFirstPartyWhenTopLevel(
++      base::StringPiece scheme,
++      bool is_embedded_origin_secure) override {
++    return scheme == extensions::kExtensionScheme ||
++           content::ShellContentBrowserClient::
++               ShouldTreatURLSchemeAsFirstPartyWhenTopLevel(
++                   scheme, is_embedded_origin_secure);
 +  }
 +
 +  void RegisterNonNetworkNavigationURLLoaderFactories(
@@ -5871,6 +6356,158 @@ index 0000000000..cb9dd5a5d6
 +}  // namespace rhenium
 +
 +#endif  // EXTENSIONS_RHENIUM_RHENIUM_MAIN_DELEGATE_H_
+diff --git a/extensions/rhenium/rhenium_pdf.cc b/extensions/rhenium/rhenium_pdf.cc
+new file mode 100644
+index 0000000000..3e230f78b7
+--- /dev/null
++++ b/extensions/rhenium/rhenium_pdf.cc
+@@ -0,0 +1,108 @@
++// Copyright 2026 Doalo
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "extensions/rhenium/rhenium_pdf.h"
++
++#include <string>
++
++#include "base/functional/bind.h"
++#include "base/logging.h"
++#include "base/strings/string_util.h"
++#include "base/task/single_thread_task_runner.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/navigation_throttle.h"
++#include "content/public/browser/web_contents.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/common/constants.h"
++#include "extensions/common/extension.h"
++#include "net/base/url_util.h"
++#include "net/http/http_content_disposition.h"
++#include "net/http/http_response_headers.h"
++#include "url/gurl.h"
++
++namespace rhenium {
++
++namespace {
++
++// Clé du manifeste de j5\pdfjs.
++constexpr char kViewerId[] = "jofiphiaggcjbefdfkpajonmlakcbkng";
++constexpr char kViewerPath[] = "/web/viewer.html";
++constexpr char kUrlParam[] = "url";
++
++class PdfThrottle : public content::NavigationThrottle {
++ public:
++  using content::NavigationThrottle::NavigationThrottle;
++
++  ThrottleCheckResult WillProcessResponse() override {
++    content::NavigationHandle* handle = navigation_handle();
++    const net::HttpResponseHeaders* headers = handle->GetResponseHeaders();
++    std::string mime;
++    if (!headers || !headers->GetMimeType(&mime) ||
++        !base::EqualsCaseInsensitiveASCII(mime, "application/pdf") ||
++        handle->IsPost()) {
++      return PROCEED;
++    }
++    std::string disposition;
++    if (headers->GetNormalizedHeader("Content-Disposition", &disposition) &&
++        net::HttpContentDisposition(disposition, std::string())
++            .is_attachment()) {
++      return PROCEED;
++    }
++    content::WebContents* web_contents = handle->GetWebContents();
++    const extensions::Extension* viewer =
++        extensions::ExtensionRegistry::Get(web_contents->GetBrowserContext())
++            ->enabled_extensions()
++            .GetByID(kViewerId);
++    if (!viewer)
++      return PROCEED;
++
++    const GURL viewer_url = net::AppendQueryParameter(
++        viewer->GetResourceURL(kViewerPath), kUrlParam,
++        handle->GetURL().spec());
++    LOG(INFO) << "Rhenium : PDF ouvert dans la liseuse";
++    // Pas pendant l'annulation de cette navigation.
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE,
++        base::BindOnce(
++            [](base::WeakPtr<content::WebContents> web_contents,
++               const GURL& url, ui::PageTransition transition) {
++              if (!web_contents)
++                return;
++              content::NavigationController::LoadURLParams params(url);
++              params.transition_type = transition;
++              web_contents->GetController().LoadURLWithParams(params);
++            },
++            web_contents->GetWeakPtr(), viewer_url,
++            handle->GetPageTransition()));
++    return CANCEL_AND_IGNORE;
++  }
++
++  const char* GetNameForLogging() override { return "RheniumPdfThrottle"; }
++};
++
++}  // namespace
++
++std::unique_ptr<content::NavigationThrottle> MaybeCreatePdfThrottle(
++    content::NavigationHandle* handle) {
++  if (!handle->IsInPrimaryMainFrame() ||
++      !handle->GetURL().SchemeIsHTTPOrHTTPS()) {
++    return nullptr;
++  }
++  return std::make_unique<PdfThrottle>(handle);
++}
++
++GURL PdfSourceUrl(const GURL& url) {
++  if (!url.SchemeIs(extensions::kExtensionScheme) ||
++      url.host_piece() != kViewerId || url.path_piece() != kViewerPath) {
++    return url;
++  }
++  std::string value;
++  if (!net::GetValueForKeyInQuery(url, kUrlParam, &value))
++    return url;
++  GURL source(value);
++  return source.SchemeIsHTTPOrHTTPS() ? source : url;
++}
++
++}  // namespace rhenium
+diff --git a/extensions/rhenium/rhenium_pdf.h b/extensions/rhenium/rhenium_pdf.h
+new file mode 100644
+index 0000000000..97e874e51a
+--- /dev/null
++++ b/extensions/rhenium/rhenium_pdf.h
+@@ -0,0 +1,32 @@
++// Copyright 2026 Doalo
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef EXTENSIONS_RHENIUM_RHENIUM_PDF_H_
++#define EXTENSIONS_RHENIUM_RHENIUM_PDF_H_
++
++#include <memory>
++
++class GURL;
++
++namespace content {
++class NavigationHandle;
++class NavigationThrottle;
++}  // namespace content
++
++namespace rhenium {
++
++// Liseuse PDF : PDF.js, extension du paquet (Extensions\PdfViewer). Une
++// réponse PDF du cadre principal, ni jointe (Content-Disposition) ni issue
++// d'un POST, s'ouvre dans web/viewer.html?url=<adresse>, qui la recharge ; les
++// autres sont téléchargées.
++std::unique_ptr<content::NavigationThrottle> MaybeCreatePdfThrottle(
++    content::NavigationHandle* handle);
++
++// Adresse du PDF pour la page de la liseuse, sinon `url` : c'est elle que
++// montrent la barre d'adresse, l'historique et les onglets.
++GURL PdfSourceUrl(const GURL& url);
++
++}  // namespace rhenium
++
++#endif  // EXTENSIONS_RHENIUM_RHENIUM_PDF_H_
 diff --git a/extensions/rhenium/rhenium_permissions_api.cc b/extensions/rhenium/rhenium_permissions_api.cc
 new file mode 100644
 index 0000000000..8dd3661f56
@@ -6750,10 +7387,10 @@ index 0000000000..1ce7d64619
 +#endif  // EXTENSIONS_RHENIUM_RHENIUM_SCRIPTING_API_H_
 diff --git a/extensions/rhenium/rhenium_tab_model.cc b/extensions/rhenium/rhenium_tab_model.cc
 new file mode 100644
-index 0000000000..87379b8858
+index 0000000000..be477da102
 --- /dev/null
 +++ b/extensions/rhenium/rhenium_tab_model.cc
-@@ -0,0 +1,558 @@
+@@ -0,0 +1,612 @@
 +// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -6775,6 +7412,7 @@ index 0000000000..87379b8858
 +#include "base/strings/string_util_win.h"
 +#include "base/strings/utf_string_conversions.h"
 +#include "base/task/single_thread_task_runner.h"
++#include "base/time/time.h"
 +#include "components/version_info/version_info.h"
 +#include "content/public/browser/navigation_controller.h"
 +#include "content/public/browser/navigation_entry.h"
@@ -6789,6 +7427,7 @@ index 0000000000..87379b8858
 +#include "extensions/common/api/extension_action/action_info.h"
 +#include "extensions/common/extension.h"
 +#include "extensions/common/manifest_handlers/options_page_info.h"
++#include "extensions/rhenium/rhenium_pdf.h"
 +#include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
 +#include "third_party/skia/include/core/SkBitmap.h"
 +#include "ui/aura/window.h"
@@ -6809,10 +7448,13 @@ index 0000000000..87379b8858
 +  // Onglet restauré pas encore chargé : sa page et son titre.
 +  GURL pending_url;
 +  std::u16string pending_title;
++  // Page déchargée faute de mémoire, rechargée à l'activation.
++  bool discarded = false;
++  base::TimeTicks last_active;
 +};
 +
 +// Qui crée le prochain Shell.
-+enum class Creator { kPage, kUser, kRestore, kOverlay };
++enum class Creator { kPage, kUser, kRestore, kOverlay, kDiscard };
 +
 +TabObserver g_observer;
 +std::vector<Tab>& Tabs() {
@@ -6822,6 +7464,7 @@ index 0000000000..87379b8858
 +int g_active_id = 0;
 +int g_next_id = 1;
 +Creator g_creator = Creator::kPage;
++int g_discarded_id = 0;  // onglet dont le Shell est remplacé (kDiscard)
 +content::Shell* g_overlay = nullptr;
 +bool g_app_visible = true;
 +
@@ -6901,19 +7544,21 @@ index 0000000000..87379b8858
 +  }
 +
 +  void Visit(content::NavigationEntry* entry) {
-+    if (!g_observer.page_visited || !entry ||
-+        !entry->GetURL().SchemeIsHTTPOrHTTPS()) {
++    if (!g_observer.page_visited || !entry)
 +      return;
-+    }
-+    g_observer.page_visited(g_observer.context, Wide(entry->GetURL()).c_str(),
++    const GURL url = PdfSourceUrl(entry->GetURL());
++    if (!url.SchemeIsHTTPOrHTTPS())
++      return;
++    g_observer.page_visited(g_observer.context, Wide(url).c_str(),
 +                            base::AsWString(entry->GetTitle()).c_str());
 +  }
 +
-+  // Fermé hors du modèle : arrêt du moteur.
++  // Fermé hors du modèle : arrêt du moteur. Pas l'ancienne page d'un onglet
++  // déchargé, dont le Shell est déjà remplacé.
 +  void WebContentsDestroyed() override {
 +    std::vector<Tab>& tabs = Tabs();
 +    for (auto it = tabs.begin(); it != tabs.end(); ++it) {
-+      if (it->id == id_) {
++      if (it->id == id_ && it->shell->web_contents() == web_contents()) {
 +        tabs.erase(it);
 +        break;
 +      }
@@ -7018,12 +7663,20 @@ index 0000000000..87379b8858
 +      Hide(other.shell);
 +  }
 +  g_active_id = tab.id;
++  tab.last_active = base::TimeTicks::Now();
 +  LOG(INFO) << "Rhenium : onglet " << tab.id << " actif (" << Tabs().size()
 +            << " onglets)";
 +  if (tab.pending_url.is_valid()) {
 +    tab.shell->LoadURL(tab.pending_url);
 +    tab.pending_url = GURL();
 +    tab.pending_title.clear();
++  }
++  if (tab.discarded) {
++    tab.discarded = false;
++    content::NavigationController& controller =
++        tab.shell->web_contents()->GetController();
++    controller.SetNeedsReload();
++    controller.LoadIfNecessary();
 +  }
 +  content::WebContents* web_contents = tab.shell->web_contents();
 +  web_contents->GetNativeView()->Show();
@@ -7042,12 +7695,18 @@ index 0000000000..87379b8858
 +    shell->web_contents()->GetNativeView()->SetBounds(
 +        active->shell->web_contents()->GetNativeView()->bounds());
 +  }
++  if (g_creator == Creator::kDiscard) {
++    new TabWatcher(shell->web_contents(), g_discarded_id);
++    Hide(shell);
++    return;
++  }
 +  const int id = g_next_id++;
 +  const int opener_id = g_creator == Creator::kPage ? g_active_id : 0;
 +  LOG(INFO) << "Rhenium : onglet " << id << " ouvert"
 +            << (opener_id ? " par un lien de l'onglet " : "")
 +            << (opener_id ? base::NumberToString(opener_id) : "");
 +  Tabs().push_back({id, shell, opener_id});
++  Tabs().back().last_active = base::TimeTicks::Now();
 +  new TabWatcher(shell->web_contents(), id);
 +  if (g_creator == Creator::kRestore)
 +    Hide(shell);
@@ -7127,7 +7786,8 @@ index 0000000000..87379b8858
 +          base::AsWString(pending ? tab.pending_title
 +                                  : web_contents->GetTitle())
 +              .c_str(),
-+          Wide(pending ? tab.pending_url : web_contents->GetVisibleURL())
++          Wide(pending ? tab.pending_url
++                       : PdfSourceUrl(web_contents->GetVisibleURL()))
 +              .c_str());
 +  }
 +}
@@ -7207,6 +7867,37 @@ index 0000000000..87379b8858
 +    return true;
 +  }
 +  return FindTab(tab->opener_id) && CloseTab(tab->id);
++}
++
++bool DiscardTab() {
++  Tab* oldest = nullptr;
++  for (Tab& tab : Tabs()) {
++    if (tab.id != g_active_id && !tab.discarded &&
++        !tab.pending_url.is_valid() &&
++        (!oldest || tab.last_active < oldest->last_active)) {
++      oldest = &tab;
++    }
++  }
++  if (!oldest)
++    return false;
++  content::Shell* old = oldest->shell;
++  content::Shell* fresh = nullptr;
++  {
++    base::AutoReset<Creator> creator(&g_creator, Creator::kDiscard);
++    base::AutoReset<int> discarded_id(&g_discarded_id, oldest->id);
++    fresh = content::Shell::CreateNewWindow(
++        old->web_contents()->GetBrowserContext(), GURL(), nullptr,
++        old->web_contents()->GetNativeView()->bounds().size());
++  }
++  // Historique gardé : précédent et suivant marchent après le rechargement.
++  fresh->web_contents()->GetController().CopyStateFrom(
++      &old->web_contents()->GetController(), /*needs_reload=*/false);
++  oldest->shell = fresh;
++  oldest->discarded = true;
++  LOG(INFO) << "Rhenium : onglet " << oldest->id << " déchargé";
++  Hide(old);
++  CloseLater(old);
++  return true;
 +}
 +
 +void CaptureActiveTab() {
@@ -7314,10 +8005,10 @@ index 0000000000..87379b8858
 +}  // namespace rhenium
 diff --git a/extensions/rhenium/rhenium_tab_model.h b/extensions/rhenium/rhenium_tab_model.h
 new file mode 100644
-index 0000000000..494e8cd547
+index 0000000000..3104e9759e
 --- /dev/null
 +++ b/extensions/rhenium/rhenium_tab_model.h
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,106 @@
 +// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -7401,6 +8092,10 @@ index 0000000000..494e8cd547
 +// Précédent dans l'onglet actif ; à défaut, ferme l'onglet ouvert par un lien
 +// et revient à celui du lien. Faux s'il n'y a rien à faire.
 +bool GoBack();
++// Mémoire critique : décharge la page de l'onglet inactif utilisé le moins
++// récemment, qui garde son historique et se recharge à son activation. Faux
++// s'il n'y en a plus.
++bool DiscardTab();
 +// Demande un aperçu de l'onglet actif (rappel tab_thumbnail).
 +void CaptureActiveTab();
 +
@@ -8431,6 +9126,39 @@ index 55566b9d6a..1652b1cb24 100644
    if (external_decoder_factory_) {
      external_decoder_factory_->CreateAudioDecoders(task_runner, media_log,
                                                     audio_decoders);
+diff --git a/media/renderers/video_renderer_impl.cc b/media/renderers/video_renderer_impl.cc
+index 362a7824fb..9816109196 100644
+--- a/media/renderers/video_renderer_impl.cc
++++ b/media/renderers/video_renderer_impl.cc
+@@ -13,6 +13,7 @@
+ #include "base/functional/callback.h"
+ #include "base/functional/callback_helpers.h"
+ #include "base/location.h"
++#include "base/logging.h"
+ #include "base/metrics/histogram_macros.h"
+ #include "base/numerics/safe_conversions.h"
+ #include "base/strings/string_util.h"
+@@ -834,6 +835,20 @@ void VideoRendererImpl::UpdateStats_Locked(bool force_update) {
+     return;
+   }
+ 
++#if defined(WINUWP)
++  // Rhénium : images décodées et perdues, dans le journal toutes les 300.
++  static size_t decoded_total = 0;
++  static size_t dropped_total = 0;
++  decoded_total += stats_.video_frames_decoded;
++  dropped_total += stats_.video_frames_dropped;
++  if (decoded_total >= 300) {
++    LOG(INFO) << "Rhenium : vidéo, " << decoded_total << " images décodées, "
++              << dropped_total << " perdues, "
++              << algorithm_->average_frame_duration().InMillisecondsF()
++              << " ms par image";
++    decoded_total = dropped_total = 0;
++  }
++#endif
+   if (stats_.video_frames_dropped) {
+     TRACE_EVENT_INSTANT2("media", "VideoFramesDropped",
+                          TRACE_EVENT_SCOPE_THREAD, "count",
 diff --git a/mojo/public/tools/bindings/generators/mojom_ts_generator.py b/mojo/public/tools/bindings/generators/mojom_ts_generator.py
 index d8e0cf3048..908af35fd1 100644
 --- a/mojo/public/tools/bindings/generators/mojom_ts_generator.py

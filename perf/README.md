@@ -30,4 +30,6 @@ Banc de division du 2026-10-20 (paquet 0.4.26293.140, `processeur : division 1, 
 | Wasm `i32.div_s` | 25,3 ms | 25,0 / 25,4 / 25,3 |
 | Wasm `i32.rem_u` | 25,8 ms | 27,8 / 25,6 / 25,8 |
 
-Les écarts d'une session à l'autre (témoins à 40 ms dans la troisième, division à 25 puis 41 ms) viennent sans doute du passage d'un cœur Cortex-A57 à un Cortex-A53 : le premier tour de chaque session est écarté par la médiane, pas ce changement de cœur. Le wasm, stable à 25 ms, utilise `sdiv`/`udiv`. La mesure « avant » (`--js-flags=--arm-arch=armv7` dans `rhenium-args.txt`) reste à faire pour chiffrer le gain, de même que le temps de décodage VP9.
+Les écarts d'une session à l'autre (témoins à 40 ms dans la troisième, division à 25 puis 41 ms) viennent sans doute du passage d'un cœur Cortex-A57 à un Cortex-A53 : le premier tour de chaque session est écarté par la médiane, pas ce changement de cœur. Le wasm, stable à 25 ms, utilise `sdiv`/`udiv`. La mesure « avant » (`--js-flags=--arm-arch=armv7` dans `rhenium-args.txt`) reste à faire pour chiffrer le gain.
+
+Décodage VP9 mesuré le 2026-11-01 sur YouTube (journal, 300 trames) : 5,5 à 7,5 ms par image en 640x360, 11 à 13 ms en 1280x720. Le goulot de la lecture était le dessin de l'image par Skia, pas le décodage : voir `..\j5\README.md` (vidéo fluide).
