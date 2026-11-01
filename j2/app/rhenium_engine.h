@@ -24,7 +24,7 @@ typedef struct RheniumHost {
   float width_dip;
   float height_dip;
   float scale;
-  /* Page de départ ; nulle : page de test du moteur. */
+  /* Page de départ (sinon, celle de content_shell). */
   const wchar_t* start_url;
 
   /* Donne la swap chain du moteur au SwapChainPanel. Appelé depuis le thread
@@ -36,6 +36,20 @@ typedef struct RheniumHost {
   void (*title_changed)(void* context, const wchar_t* title);
   /* Avancement du chargement, de 0 à 1. */
   void (*progress_changed)(void* context, double progress);
+  /* Onglet ouvert, fermé ou activé. Les rappels ci-dessus suivent l'onglet
+   * actif. */
+  void (*tabs_changed)(void* context, int count);
+  /* Page http(s) chargée dans un onglet, puis de nouveau à l'arrivée de son
+   * titre (même adresse). */
+  void (*page_visited)(void* context, const wchar_t* url, const wchar_t* title);
+  /* Aperçu d'un onglet, en BGRA, valable pendant l'appel. */
+  void (*tab_thumbnail)(void* context, int id, const unsigned char* bgra,
+                        int width, int height, int stride);
+  /* Fin d'une installation d'extension : son nom, ou la raison de l'échec. */
+  void (*extension_installed)(void* context, int ok, const wchar_t* text);
+  /* Langue des pages (Accept-Language), des extensions et des messages du
+   * moteur : « fr-FR », « en-US »… NULL : celle du téléphone. */
+  const wchar_t* language;
 } RheniumHost;
 
 /* Journal de l'app (LocalState, recopié dans Phone\Downloads), à démarrer
@@ -47,12 +61,65 @@ void RheniumEngineNote(const wchar_t* text);
  * tourner le CoreDispatcher, donc aussi XAML. */
 int RheniumEngineRun(const RheniumHost* host);
 
-/* Adresse ou recherche, telle que tapée dans la barre. */
+/* Adresse ou recherche, telle que tapée dans la barre, dans l'onglet actif. */
 void RheniumEngineNavigate(const wchar_t* text);
-void RheniumEngineGoBack(void);
+/* Moteur de recherche : préfixe http(s) auquel s'ajoute le texte cherché
+ * (« https://duckduckgo.com/?q= », celui par défaut). Possible avant
+ * RheniumEngineRun. */
+void RheniumEngineSetSearchUrl(const wchar_t* prefix);
+/* Ferme la page d'extension, sinon recule dans l'onglet, sinon ferme l'onglet
+ * ouvert par un lien et revient à celui du lien. 0 s'il n'y avait rien à
+ * faire. */
+int RheniumEngineGoBack(void);
 void RheniumEngineGoForward(void);
 void RheniumEngineReload(void);
 void RheniumEngineStop(void);
+
+/* Onglets, identifiés par un entier stable. Nouvel onglet actif sur
+ * l'adresse ou la recherche ; 0 au-delà de la limite (8 onglets). */
+int RheniumEngineNewTab(const wchar_t* text);
+/* Onglet d'une session précédente, en arrière-plan : sa page ne se charge
+ * qu'à son activation. 0 au-delà de la limite. */
+int RheniumEngineRestoreTab(const wchar_t* url, const wchar_t* title);
+void RheniumEngineActivateTab(int id);
+/* 0 pour le dernier onglet, qui reste. */
+int RheniumEngineCloseTab(int id);
+/* Parcourt les onglets dans l'ordre ; les chaînes valent pendant l'appel. */
+void RheniumEngineListTabs(void (*visit)(void* context, int id, int active,
+                                         const wchar_t* title,
+                                         const wchar_t* url),
+                           void* context);
+/* Demande un aperçu de l'onglet actif (rappel tab_thumbnail). Celui d'un
+ * onglet qu'on quitte est pris tout seul. */
+void RheniumEngineCaptureTab(void);
+
+/* Popup ou page d'options de l'extension (uBlock Origin Lite), par-dessus la
+ * page et fermés par GoBack ; 0 si aucune extension n'en a. */
+int RheniumEngineOpenExtensionPopup(void);
+int RheniumEngineOpenExtensionOptions(void);
+
+/* Extensions installées, celles du paquet d'abord. Identifiant de 32
+ * lettres ; « removable » vaut 1 pour celles du Chrome Web Store. Les chaînes
+ * valent pendant l'appel. */
+void RheniumEngineListExtensions(void (*visit)(void* context, const char* id,
+                                               const wchar_t* name,
+                                               const wchar_t* version,
+                                               int enabled, int removable,
+                                               int has_popup, int has_options),
+                                 void* context);
+int RheniumEngineSetExtensionEnabled(const char* id, int enabled);
+int RheniumEngineUninstallExtension(const char* id);
+int RheniumEngineOpenExtensionPopupFor(const char* id);
+int RheniumEngineOpenExtensionOptionsFor(const char* id);
+/* Identifiant (33 caractères avec le zéro final) de l'extension dont `url`
+ * est la page sur le Chrome Web Store ; 0 si ce n'en est pas une. */
+int RheniumEngineWebStoreId(const wchar_t* url, char id[33]);
+/* Télécharge, vérifie et installe l'extension (rappel extension_installed).
+ * 0 si une autre installation est en cours. */
+int RheniumEngineInstallExtension(const char* id);
+
+/* Version de Chromium, par exemple « 116.0.5845.228 ». */
+const wchar_t* RheniumEngineChromiumVersion(void);
 
 /* Pointeurs sur la zone de contenu, en DIP. */
 enum {

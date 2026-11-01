@@ -489,10 +489,10 @@ index 049c9eef22..18d1b79b78 100644
  #define TRAP_SEQUENCE1_() asm volatile("int3")
 diff --git a/base/message_loop/message_pump_uwp.cc b/base/message_loop/message_pump_uwp.cc
 new file mode 100644
-index 0000000000..426a204e44
+index 0000000000..e83427d342
 --- /dev/null
 +++ b/base/message_loop/message_pump_uwp.cc
-@@ -0,0 +1,296 @@
+@@ -0,0 +1,294 @@
 +// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -506,7 +506,6 @@ index 0000000000..426a204e44
 +#include <wrl/ftm.h>
 +#include <wrl/implements.h>
 +
-+#include <algorithm>
 +#include <atomic>
 +
 +#include "base/check.h"
@@ -643,11 +642,10 @@ index 0000000000..426a204e44
 +
 +  ScheduleWork();
 +  while (!state.should_quit) {
-+    last_process_events_result_ = core_->dispatcher->ProcessEvents(
++    const HRESULT hr = core_->dispatcher->ProcessEvents(
 +        ABI::Windows::UI::Core::CoreProcessEventsOption_ProcessOneAndAllPending);
-+    if (FAILED(last_process_events_result_)) {
-+      LOG(ERROR) << "CoreDispatcher::ProcessEvents : " << std::hex
-+                 << last_process_events_result_;
++    if (FAILED(hr)) {
++      LOG(ERROR) << "CoreDispatcher::ProcessEvents : " << std::hex << hr;
 +      break;
 +    }
 +  }
@@ -791,10 +789,10 @@ index 0000000000..426a204e44
 +}  // namespace base
 diff --git a/base/message_loop/message_pump_uwp.h b/base/message_loop/message_pump_uwp.h
 new file mode 100644
-index 0000000000..85bf388736
+index 0000000000..27961ac9e6
 --- /dev/null
 +++ b/base/message_loop/message_pump_uwp.h
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,90 @@
 +// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -858,12 +856,6 @@ index 0000000000..85bf388736
 +  void AddObserver(Observer* observer) {}
 +  void RemoveObserver(Observer* observer) {}
 +
-+  // Résultat du dernier CoreDispatcher::ProcessEvents (S_OK s'il n'y en a pas
-+  // eu), pour le diagnostic.
-+  HRESULT last_process_events_result() const {
-+    return last_process_events_result_;
-+  }
-+
 + private:
 +  class Core;
 +
@@ -886,7 +878,6 @@ index 0000000000..85bf388736
 +  bool attached_quit_ = false;
 +  TimeTicks timer_run_time_;
 +  int timer_generation_ = 0;
-+  HRESULT last_process_events_result_ = S_OK;
 +};
 +
 +}  // namespace base

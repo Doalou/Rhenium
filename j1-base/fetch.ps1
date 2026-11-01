@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 <#
 .SYNOPSIS
   Récupère les sources de Chromium 116.0.5845.228 utiles à //base, dossier par dossier
@@ -5,6 +6,7 @@
 .DESCRIPTION
   Un dépôt git local dans ..\chromium\src garde l'état d'origine de chaque dossier ajouté :
   les correctifs Rhénium se produisent ensuite par git diff.
+  Pose aussi gn.exe et ninja.exe (CIPD, versions du DEPS) dans ..\toolchains\gn et ..\toolchains\ninja.
 .EXAMPLE
   ./fetch.ps1
   ./fetch.ps1 -Dirs tools/win
@@ -71,13 +73,17 @@ function Get-Files([string] $Path, [string] $Url, [string[]] $Files) {
 
 # Fichier réclamé dans un dépôt du DEPS (hors chromium/src) : seulement les fichiers de build
 # de la racine du dépôt et du dossier du fichier, assez pour que GN résolve les cibles.
-function Get-DepsBuildFiles([string] $MissingPath) {
+function Get-Deps {
   $depsFile = Join-Path (Split-Path $Src) "DEPS-$tag"
   if (-not (Test-Path $depsFile)) {
     $text = Invoke-RestMethod "$chromium/chromium/src/+/refs/tags/$tag/DEPS?format=TEXT"
     [IO.File]::WriteAllBytes($depsFile, [Convert]::FromBase64String($text))
   }
-  $deps = Get-Content $depsFile -Raw
+  Get-Content $depsFile -Raw
+}
+
+function Get-DepsBuildFiles([string] $MissingPath) {
+  $deps = Get-Deps
   $parts = $MissingPath -split '/'
   for ($n = $parts.Count - 1; $n -ge 1; $n--) {
     $repo = ($parts[0..($n - 1)]) -join '/'
@@ -150,6 +156,26 @@ if (-not (Test-Path $lastChange)) {
   $time = [DateTimeOffset]::new(2023, 9, 27, 10, 10, 49, [TimeSpan]::Zero).ToUnixTimeSeconds()
   Set-Content $lastChange -Encoding ascii "LASTCHANGE=$commit-refs/tags/$tag`nLASTCHANGE_YEAR=2023"
   Set-Content "$lastChange.committime" -Encoding ascii -NoNewline "$time"
+}
+
+# GN et ninja : paquets CIPD (des zip) aux versions du DEPS, dans ..\toolchains (hors de l'arbre).
+function Get-Cipd([string] $Package, [string] $Version, [string] $Dir, [string] $Exe) {
+  if (Test-Path "$Dir\$Exe") { return }
+  New-Item -ItemType Directory -Force $Dir | Out-Null
+  $zip = "$Dir\cipd.zip"
+  Write-Host "CIPD : $Package @ $Version" -ForegroundColor Cyan
+  Invoke-WebRequest "https://chrome-infra-packages.appspot.com/dl/$Package/+/$Version" -OutFile $zip
+  Expand-Archive $zip $Dir -Force
+  Remove-Item $zip
+  if (-not (Test-Path "$Dir\$Exe")) { throw "$Exe absent du paquet $Package" }
+}
+$deps = Get-Deps
+$toolchains = Join-Path (Split-Path (Split-Path $Src)) 'toolchains'
+foreach ($tool in @{ Var = 'gn_version'; Package = 'gn/gn/windows-amd64'; Exe = 'gn.exe' },
+                  @{ Var = 'ninja_version'; Package = 'infra/3pp/tools/ninja/windows-amd64'; Exe = 'ninja.exe' }) {
+  $version = [regex]::Match($deps, "'$($tool.Var)':\s*'([^']+)'").Groups[1].Value
+  if (-not $version) { throw "$($tool.Var) absent du DEPS de $tag" }
+  Get-Cipd $tool.Package $version (Join-Path $toolchains ($tool.Exe -replace '\.exe$')) $tool.Exe
 }
 
 if (-not (Test-Path "$Src\.git")) {

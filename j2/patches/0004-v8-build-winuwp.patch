@@ -1,0 +1,23 @@
+diff --git a/v8/BUILD.gn b/v8/BUILD.gn
+index c13cf053a8..ae7381fb14 100644
+--- a/v8/BUILD.gn
++++ b/v8/BUILD.gn
+@@ -1363,7 +1363,7 @@ config("toolchain") {
+   } else if (target_os == "mac") {
+     defines += [ "V8_HAVE_TARGET_OS" ]
+     defines += [ "V8_TARGET_OS_MACOS" ]
+-  } else if (target_os == "win") {
++  } else if (target_os == "win" || target_os == "winuwp") {  # Rhénium
+     defines += [ "V8_HAVE_TARGET_OS" ]
+     defines += [ "V8_TARGET_OS_WIN" ]
+   } else if (target_os == "chromeos") {
+@@ -2263,7 +2263,8 @@ template("run_mksnapshot") {
+       # target toolchains.  The same host binary is used to generate both, so
+       # mksnapshot needs to know which target OS to use at runtime.  It's weird,
+       # but the target OS is really |current_os|.
+-      "--target_os=$current_os",
++      # Rhénium : mksnapshot ne connaît que win pour Windows.
++      "--target_os=" + string_replace(current_os, "winuwp", "win"),
+       "--target_arch=$current_cpu",
+ 
+       "--embedded_src",

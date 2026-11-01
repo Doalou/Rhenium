@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 <#
 .SYNOPSIS
   Compile Chromium //base (116.0.5845.228) pour Windows 10 Mobile : target_os winuwp, ARM32,
@@ -6,7 +7,8 @@
   ./build-base.ps1 -GenOnly   # correctifs, racine GN, args.gn, gn gen
   ./build-base.ps1            # + ninja : obj\rhenium_base.lib (//base, dépendances, test de fumée)
                               #   et obj\rhenium_base_tests.lib + rhenium_base_unittests.lib (sous-ensemble de base_unittests)
-  Utilisé aussi par ..\j2\build-content.ps1 (-ExtraArgs, -Targets, -PatchDirs, -ExtraRootGn).
+  Utilisé aussi par ..\j2\build-content.ps1 (-ExtraArgs, -Targets, -PatchDirs, -V8Patches, -ExtraRootGn).
+  gn.exe et ninja.exe : ..\toolchains\gn et ..\toolchains\ninja, posés par .\fetch.ps1.
 #>
 param(
   [string] $Src = "$PSScriptRoot\..\chromium\src",
@@ -15,6 +17,7 @@ param(
   [string[]] $ExtraArgs = @(),  # lignes args.gn en plus
   [string[]] $Targets = @('rhenium_base', 'rhenium_base_tests', 'rhenium_base_unittests'),
   [string[]] $PatchDirs = @(),  # dossiers de correctifs appliqués après ceux de J1
+  [string[]] $V8Patches = @(),  # correctifs du V8 autonome (..\j1\patches), appliqués dans v8/
   [string] $ExtraRootGn,       # ajouté à la racine GN (gn\BUILD.gn)
   [switch] $KeepGoing,         # ninja -k 0 : compiler tout ce qui peut l'être
   [switch] $GenOnly
@@ -24,31 +27,29 @@ $ErrorActionPreference = 'Stop'
 $Src = (Resolve-Path $Src).Path
 $root = Split-Path (Split-Path $Src)
 
-$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-$toolsets = & $vswhere -all -prerelease -products * -property installationPath |
-  ForEach-Object { Get-ChildItem "$_\VC\Tools\MSVC" -Directory -ErrorAction SilentlyContinue } |
-  Sort-Object { [version]$_.Name }
-$msvc = $toolsets | Where-Object { Test-Path "$($_.FullName)\lib\arm\libcmt.lib" } | Select-Object -Last 1
-if (-not $msvc) { throw 'Aucun toolset MSVC avec les bibliothèques ARM32 (14.44).' }
-$vsPath = $msvc.FullName -replace '\\VC\\Tools\\MSVC\\.*$', ''
-$env:RHENIUM_MSVC_DIR = $msvc.FullName
-# ATL ARM32 peut venir d'un autre toolset (14.30 ici) : compatibilité binaire de MSVC 14.x.
-$atl = $toolsets | Where-Object { Test-Path "$($_.FullName)\atlmfc\lib\arm\atls.lib" } | Select-Object -Last 1
-if ($atl) { $env:RHENIUM_ATL_DIR = "$($atl.FullName)\atlmfc" }
-$env:RHENIUM_WINSDK_VERSION = '10.0.19041.0'
-$env:RHENIUM_WINSDK_DIR = "${env:ProgramFiles(x86)}\Windows Kits\10"
-$env:DEPOT_TOOLS_WIN_TOOLCHAIN = '0'
+. "$PSScriptRoot\toolchain-env.ps1"
+$vsPath = (Set-ToolchainEnv) -replace '\\VC\\Tools\\MSVC\\.*$', ''
 $python = (Get-Command python -ErrorAction Stop).Source
 $clangVersion = (& "$LlvmDir\bin\clang-cl.exe" --version | Select-Object -First 1) -replace '^clang version (\d+).*$', '$1'
 
-$patches = @(Get-ChildItem "$PSScriptRoot\patches\*.patch" -ErrorAction SilentlyContinue | Sort-Object Name) +
-  @($PatchDirs | ForEach-Object { Get-ChildItem "$_\*.patch" -ErrorAction SilentlyContinue | Sort-Object Name })
+$gn = "$root\toolchains\gn\gn.exe"  # même révision de GN que Chromium M116
+$ninja = "$root\toolchains\ninja\ninja.exe"
+foreach ($tool in $gn, $ninja) {
+  if (-not (Test-Path $tool)) { throw "$tool absent : lancer $PSScriptRoot\fetch.ps1." }
+}
+
+# Correctifs de Chromium, puis ceux du V8 autonome (chemins relatifs à v8/, d'où --directory).
+$patches = @(@(Get-ChildItem "$PSScriptRoot\patches\*.patch" -ErrorAction SilentlyContinue | Sort-Object Name) +
+  @($PatchDirs | ForEach-Object { Get-ChildItem "$_\*.patch" -ErrorAction SilentlyContinue | Sort-Object Name }) |
+  ForEach-Object { @{ File = $_; Options = @() } })
+$patches += @($V8Patches | ForEach-Object { @{ File = Get-Item $_; Options = @('--directory=v8') } })
 foreach ($patch in $patches) {
-  git -C $Src apply --check --reverse $patch.FullName 2>$null
+  $options = $patch.Options
+  git -C $Src apply @options --check --reverse $patch.File.FullName 2>$null
   if ($LASTEXITCODE -eq 0) { continue }
-  git -C $Src apply --whitespace=nowarn $patch.FullName
-  if ($LASTEXITCODE -ne 0) { throw "Le correctif $($patch.Name) ne s'applique pas." }
-  Write-Host "correctif appliqué : $($patch.Name)" -ForegroundColor Cyan
+  git -C $Src apply @options --whitespace=nowarn $patch.File.FullName
+  if ($LASTEXITCODE -ne 0) { throw "Le correctif $($patch.File.Name) ne s'applique pas." }
+  Write-Host "correctif appliqué : $($patch.File.Name)" -ForegroundColor Cyan
 }
 
 Copy-Item "$PSScriptRoot\gn\dot.gn" "$Src\.gn" -Force
@@ -72,6 +73,7 @@ target_os = "winuwp"
 target_cpu = "arm"
 target_winuwp_family = "desktop"
 is_debug = false
+dcheck_always_on = false
 is_component_build = false
 symbol_level = 1
 is_clang = true
@@ -92,12 +94,16 @@ use_allocator_shim = false
 enable_backup_ref_ptr_support = false
 enable_rust = false
 "@
-if ($ExtraArgs) { $argsGn += "`n" + ($ExtraArgs -join "`n") }
+if ($ExtraArgs) {
+  # Un argument de l'appelant remplace celui d'ici au lieu de s'y ajouter.
+  $keys = $ExtraArgs | ForEach-Object { ($_ -split '=')[0].Trim() }
+  $argsGn = ($argsGn -split '\r?\n' | Where-Object { ($_ -split '=')[0].Trim() -notin $keys }) -join "`n"
+  $argsGn += "`n" + ($ExtraArgs -join "`n")
+}
 $out = Join-Path $Src $OutDir
 New-Item -ItemType Directory -Force $out | Out-Null
 Set-Content "$out\args.gn" $argsGn -Encoding ascii
 
-$gn = "$root\v8\buildtools\win\gn.exe"  # même révision de GN que Chromium M116
 Push-Location $Src
 try {
   $output = & $gn gen $OutDir "--script-executable=$python" 2>&1
@@ -108,6 +114,6 @@ try {
   Write-Host "$($output | Select-Object -Last 1)"
   if ($GenOnly) { return }
   $keep = if ($KeepGoing) { '-k 0' } else { '' }
-  cmd /c "`"$root\v8\third_party\ninja\ninja.exe`" -C $OutDir $keep $($Targets -join ' ') < NUL"
+  cmd /c "`"$ninja`" -C $OutDir $keep $($Targets -join ' ') < NUL"
   if ($LASTEXITCODE -ne 0) { throw "ninja a échoué (code $LASTEXITCODE)" }
 } finally { Pop-Location }

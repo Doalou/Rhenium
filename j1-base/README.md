@@ -17,7 +17,7 @@ Statut au 2026-10-16 : **`base.lib` se construit** pour Windows 10 Mobile ARM32 
 
 ## Étape 1 : ce qui a été fait
 
-- **Version** : 116.0.5845.228. Le GN de V8 (`..\v8\buildtools\win\gn.exe`) est exactement celui de cette version (`4bd1a77e`).
+- **Version** : 116.0.5845.228. GN et ninja viennent de CIPD aux versions du `DEPS` de la balise (GN `4bd1a77e`, ninja 1.11.1), posés par `fetch.ps1` dans `..\toolchains\gn` et `..\toolchains\ninja`.
 - **Sources** : 23 dossiers, 220 Mo, par archives gitiles. Pour les dépôts externes du `DEPS` qui ne servent qu'à résoudre des cibles (ICU, catapult, libxml, zlib, nasm, protobuf…), seuls les fichiers de build sont téléchargés. `fetch.ps1` trouve leur dépôt et leur révision dans le `DEPS` de la balise.
 - **Fichiers normalement écrits par gclient** : `build/config/gclient_args.gni` (valeurs du `DEPS`, adaptées à l'arbre partiel) et `build/util/LASTCHANGE` (commit `b53ecfbe` de la balise).
 - **Racine GN** : `gn\dot.gn` et `gn\BUILD.gn`, qui ne dépend que de `//base`. La racine de Chromium référence tout le navigateur.
@@ -200,7 +200,7 @@ Les remplacements des imports absents de W10M (`kernel32legacy`), du bit Thumb e
 
 ## Configuration de build envisagée
 
-`target_os = "winuwp"`, `target_cpu = "arm"`, `target_winuwp_family = "desktop"` (option B), toolchain clang-cl 23 + STL MSVC 14.44 + SDK 10.0.19041, CRT statique (`/MT`, comme la sonde, sans dépendance à VCLibs), `is_component_build = false`, `use_custom_libcxx = false`, `enable_base_tracing = false`, `use_partition_alloc_as_malloc = false`, `use_allocator_shim = false`, `enable_rust = false`, `treat_warnings_as_errors = false`.
+`target_os = "winuwp"`, `target_cpu = "arm"`, `target_winuwp_family = "desktop"` (option B), toolchain clang-cl 23 + STL MSVC 14.44 + SDK 10.0.19041, CRT statique (`/MT`, comme la sonde, sans dépendance à VCLibs), `is_component_build = false`, `dcheck_always_on = false` (actif par défaut hors build officiel), `use_custom_libcxx = false`, `enable_base_tracing = false`, `use_partition_alloc_as_malloc = false`, `use_allocator_shim = false`, `enable_rust = false`, `treat_warnings_as_errors = false`.
 
 ## Étapes
 

@@ -2,7 +2,7 @@
 
 Objectif du cahier des charges : `content_shell` en un seul processus sur le Lumia, rendu Skia logiciel, réseau et TLS. Critère de sortie : **Wikipédia s'affiche dans content_shell**. Base : Chromium **116.0.5845.228**, celle de J1 (V8 11.6.189.22 et //base y sont validés sur le téléphone).
 
-Statut au 2026-10-16 : **étape 1 faite** (sources, `gn gen` et `ninja -n` passent : 16 954 cibles, 67 145 étapes pour `rhenium_content`), **compilation en masse en cours**.
+Statut : **atteint le 2026-10-18** (étapes ci-dessous). La suite est dans `..\j3` (navigation tactile, coquille XAML, `app\engine_uwp.cc` à la place de `app\shell_uwp_main.cc`) et `..\j4` (extensions).
 
 ## Utilisation
 
@@ -20,7 +20,7 @@ Statut au 2026-10-16 : **étape 1 faite** (sources, `gn gen` et `ninja -n` passe
 
 - **Sources** : ~300 dossiers de l'arbre et ~50 dépôts externes, puis ce que `gn gen` et `ninja -n` ont réclamé. `content_shell` est un outil de test de Chromium : sa bibliothèque dépend de `//content/test:test_support`, dont le `BUILD.gn` déclare toutes les suites de tests de content. GN lit toutes les cibles d'un fichier chargé, d'où des centaines de fichiers de build récupérés un par un (`chrome/`, `extensions/`…, fichiers de build seulement).
 - **Racine GN** : le `.gn` de Chromium tel quel (valeurs par défaut comme `crashpad_dependencies`, liste blanche d'`exec_script`), partagé avec J1.
-- **Arguments** en plus de la liste ci-dessus : `enable_extensions=false`, `enable_ipc_fuzzer=false` (ces deux-là tiraient `chrome/` dans le graphe), `build_with_tflite_lib=false`, `enable_libaom=false`, `rtc_include_dav1d_in_internal_decoder_factory=false`, `rtc_use_h264=false`.
+- **Arguments** en plus de la liste ci-dessus : `enable_extensions=false` (repassé à `true` en J4, voir `..\j4`), `enable_ipc_fuzzer=false` (ces deux-là tiraient `chrome/` dans le graphe), `build_with_tflite_lib=false`, `enable_libaom=false`, `rtc_include_dav1d_in_internal_decoder_factory=false`, `rtc_use_h264=false`.
 - **Correctif `patches\0003-content-shell-winuwp.patch`** :
   - `content_shell` : tests web, `about:tracing` et devtools hors du pak sous UWP ;
   - Aura sans Views : l'assertion de `tools/grit/grit_args.gni` exempte les builds `winuwp` ; tests Aura qui supposent Views coupés ;
@@ -48,7 +48,8 @@ Correctifs, par cause (dans `0003` sauf mention) :
 | Cause | Correctif |
 | --- | --- |
 | V8 de l'arbre sans les correctifs de J1 (677 échecs) | `..\j1\patches\0002` appliqué à `src/v8` (même commit) ; options V8 de J1 (`v8_enable_system_instrumentation`, `v8_enable_etw_stack_walking` à faux) |
-| `content` suppose les traces Perfetto | `enable_base_tracing=true` pour J2 |
+| `content` suppose les traces Perfetto | `enable_base_tracing=true` pour J2 ; un argument de J2 remplace celui de J1 dans `args.gn` au lieu de s'y ajouter |
+| DCHECK actifs par défaut hors build officiel (`build/config/dcheck_always_on.gni`) | `dcheck_always_on=false` |
 | Blink compilé une seconde fois pour la chaîne hôte du snapshot V8 | `use_v8_context_snapshot=false` |
 | Python 3.14 : `imp`, `distutils`, `cgi` retirés ; `six` 1.15 sans `find_spec` | Imports remplacés (`importlib`, `shutil`, `html`) ; `find_spec` de `six` 1.16 reporté dans les deux copies de `six` |
 | `flat_tree` et `fixed_flat_map` sur `std::array` (STL MSVC) | Dans `0002` : `base::ranges::begin/end` ne renvoient plus de pointeurs pour `std::array` avec la STL MSVC ; trois appelants corrigés |
@@ -71,7 +72,7 @@ Correctifs, par cause (dans `0003` sauf mention) :
 
 ## Étape 3 : démarrage
 
-App UWP `Rhenium.Shell` : `rhenium_shell.exe` (cible GN `rhenium_shell`, 122 Mo), empaquetée par `package-shell.ps1` (69 Mo) avec `content_shell.pak`, ICU et l'instantané V8, installée par `..\sonde\deploy.ps1 -Appx ..\j2\out\RheniumShell_arm.appx`.
+App UWP `Rhenium.Shell` : `rhenium_shell.exe` (cible GN `rhenium_shell`, 98 Mo sans les DCHECK, 129 Mo avec), empaquetée par `package-shell.ps1` (64 Mo) avec `content_shell.pak`, ICU et l'instantané V8, installée par `..\sonde\deploy.ps1 -Appx ..\j2\out\RheniumShell_arm.appx`.
 
 - **Point d'entrée** (`app\shell_uwp_main.cc`) : vue `CoreApplication` en WRL ; `Run()` active la fenêtre puis lance `ContentMain`, dont la boucle du thread UI tourne sur le `CoreDispatcher` (pompe de J1). Options : `--single-process --headless --disable-gpu --disable-software-rasterizer --disable-gpu-compositing --disable-legacy-window --no-sandbox`, `--data-path` et `--log-file` dans LocalState, complétées par `LocalState\rhenium-args.txt`. Page par défaut : un `data:` qui écrit dans la console, recopiée dans le journal.
 - **Journal** (`app\log_export_uwp.cc`) : `content_shell.log` recopié chaque seconde dans `Phone\Downloads\Rhenium.Shell…\rhenium-*.log` ; en cas d'exception non gérée, code et adresses PC/LR relatives à l'exe.

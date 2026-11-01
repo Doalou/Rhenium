@@ -95,6 +95,10 @@ def main():
     with open(path, 'rb') as f:
         data = bytearray(f.read())
     patched = fix(data, dry_run)
+    if not dry_run and patched == 0:
+        # Code généré différent (autre clang ?) : mieux vaut s'arrêter que
+        # livrer des appels virtuels faux.
+        sys.exit(f'{path} : aucun relais vcall trouvé, motif à revoir')
     if not dry_run:
         with open(path, 'wb') as f:
             f.write(data)

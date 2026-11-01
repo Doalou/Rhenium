@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 <#
 .SYNOPSIS
   Compile la coquille XAML de Rhénium (shell_app.cpp, C++/WinRT) avec MSVC, exceptions
@@ -25,22 +26,11 @@ if (-not $msvc) { throw 'Aucun toolset MSVC ne cible ARM32 (14.44).' }
 $msvc = $msvc.FullName
 $env:PATH = "$msvc\bin\Hostx64\x64;$env:PATH"
 
-# C++/WinRT récent a retiré ARM32 : branche _M_ARM remise dans une copie de base.h, placée
-# devant celle du SDK (même correctif que ..\..\sonde\build.ps1).
-$cppwinrt = (Get-Newest (Get-ChildItem "$kits\Include" -Directory |
-  Where-Object { Test-Path "$($_.FullName)\cppwinrt\winrt\base.h" })).FullName + '\cppwinrt'
+# C++/WinRT récent a retiré ARM32 : copie corrigée de base.h, devant celle du SDK.
+. "$PSScriptRoot\..\..\sonde\cppwinrt-arm32.ps1"
+$cppwinrt = Find-CppWinrt $kits
 $work = "$OutDir\rhenium_xaml_shell"
-New-Item -ItemType Directory -Force "$work\cppwinrt-arm32\winrt" | Out-Null
-$base = Get-Content "$cppwinrt\winrt\base.h" -Raw
-$arm32Read = "#elif defined _M_ARM`n        int32_t const result = __iso_volatile_load32(reinterpret_cast<int32_t const volatile*>(target));`n" +
-  "        __dmb(_ARM_BARRIER_ISH);`n        return result;`n`$0"
-$patched = [regex]::new('#else\r?\n#error Unsupported architecture\r?\n').Replace($base, $arm32Read, 1)
-$patched = $patched.Replace('#if !defined _M_IX86 && !defined _M_X64 && !defined _M_ARM64',
-  '#if !defined _M_IX86 && !defined _M_X64 && !defined _M_ARM64 && !defined _M_ARM')
-if ($patched -notmatch 'defined _M_ARM\r?\n        int32_t' -or $patched -notmatch '!defined _M_ARM\r?\n') {
-  throw "Le correctif ARM32 de C++/WinRT ne s'applique plus à $cppwinrt\winrt\base.h"
-}
-Set-Content "$work\cppwinrt-arm32\winrt\base.h" $patched -NoNewline -Encoding utf8
+Write-CppWinrtArm32 $cppwinrt "$work\cppwinrt-arm32"
 
 $obj = "$work\shell_app.obj"
 # /guard:cf : l'exe est lié avec Control Flow Guard ; sans lui, les fonctions de la coquille

@@ -1,10 +1,13 @@
+#Requires -Version 7.0
 <#
 .SYNOPSIS
-  Installe la sonde Rhénium sur un téléphone Windows 10 Mobile en mode développeur.
+  Installe un .appx (la sonde par défaut, ou l'app Rhénium) sur un téléphone Windows 10 Mobile en
+  mode développeur.
 .EXAMPLE
   ./deploy.ps1                                  # liste les téléphones visibles sur le réseau
   ./deploy.ps1 -Ip 192.168.1.42 -Pin ABC123     # premier déploiement (code d'appairage du téléphone)
-  ./deploy.ps1 -Ip 192.168.1.42                 # redéploiement (désinstalle puis réinstalle)
+  ./deploy.ps1 -Ip 192.168.1.42                 # redéploiement : mise à jour si la version monte
+  ./deploy.ps1 -Ip 192.168.1.42 -Clean          # désinstalle d'abord (efface les données de l'app)
   ./deploy.ps1 -Ip 192.168.1.42 -Appx out\RheniumSonde_arm-msvc_sans-codegen.appx
   ./deploy.ps1 -Ip 192.168.1.42 -Uninstall
 #>
@@ -12,6 +15,7 @@ param(
   [string] $Ip,
   [string] $Pin,
   [string] $Appx,
+  [switch] $Clean,
   [switch] $Uninstall
 )
 
@@ -20,7 +24,7 @@ $kits = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
 # Les WinAppDeployCmd des SDK Windows 11 échouent avec Windows 10 Mobile (0x80070003, même pour « list ») :
 # on prend le plus récent jusqu'au SDK 10.0.19041 inclus.
 $tool = Get-ChildItem $kits -Directory | Where-Object { $_.Name -match '^\d+\.\d+' -and [version]$_.Name -le [version]'10.0.19041.0' } |
-  Sort-Object { [version]$_.Name } | ForEach-Object { "$($_.FullName)\x64\WinAppDeployCmd.exe", "$($_.FullName)\x86\WinAppDeployCmd.exe" } |
+  Sort-Object { [version]$_.Name } | ForEach-Object { "$($_.FullName)\x86\WinAppDeployCmd.exe", "$($_.FullName)\x64\WinAppDeployCmd.exe" } |
   Where-Object { Test-Path $_ } | Select-Object -Last 1
 if (-not $tool) { throw 'WinAppDeployCmd compatible W10M introuvable : installer le Windows 10 SDK 10.0.19041.' }
 
@@ -53,11 +57,19 @@ if ($Appx) {
   $title = $manifest.Package.Properties.DisplayName
 }
 
-# Retire une version déjà installée : WinAppDeployCmd ne réinstalle pas un paquet de même version.
+# Une version plus ancienne est mise à jour sur place, données de l'app comprises. Une version
+# égale ou plus récente est d'abord retirée (WinAppDeployCmd ne réinstalle pas un paquet de même
+# version), ce qui efface les données, comme -Clean.
+$newVersion = if ($Appx) { [version] $manifest.Package.Identity.Version } else { $null }
 $installed = (& $tool list @target) | Where-Object { $_ -match "^$([regex]::Escape($identity))_" } | ForEach-Object { $_.Trim() }
 foreach ($name in $installed) {
-  Write-Host "Désinstallation de $name"
-  & $tool uninstall -package $name @target
+  $oldVersion = [version] ($name -split '_')[1]
+  if ($Uninstall -or $Clean -or -not $newVersion -or $oldVersion -ge $newVersion) {
+    Write-Host "Désinstallation de $name (données de l'app effacées)"
+    & $tool uninstall -package $name @target
+  } else {
+    Write-Host "Mise à jour de $oldVersion vers $newVersion, données gardées"
+  }
 }
 if ($Uninstall) { return }
 

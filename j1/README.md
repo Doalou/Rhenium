@@ -90,7 +90,7 @@ Le JIT ARM32 de V8 et ses builtins embarqués émettent de l'**A32** (« mode AR
 | --- | --- |
 | V8 11.6.189.22 | Version de Chromium M116, base visée ; pas de Rust dans V8 à cette époque |
 | Pas de gclient | Demande de l'utilisateur d'alléger le téléchargement (188 Mo au lieu de 2 à 4 Go) |
-| ICU omis, `v8_enable_i18n_support=false` | J1 n'a pas besoin d'`Intl` ; `fetch.ps1 -WithIcu` le récupère pour la suite |
+| ICU omis, `v8_enable_i18n_support=false` | J1 n'a pas besoin d'`Intl` ; Chromium récupère ICU avec ses propres sources (`..\j2\fetch.ps1`) |
 | `v8_enable_webassembly=false` | Hors périmètre J1 |
 | LLVM 23.1.3 et non le clang de Chromium | La STL MSVC 14.44 exige clang 19 ou plus récent (celui de M116 est en 17) |
 | `use_custom_libcxx=false` | V8 utilise la STL MSVC 14.44, la même que la coquille MSVC |

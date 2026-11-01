@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 <#
 .SYNOPSIS
   Compile content_shell (Chromium 116.0.5845.228) pour Windows 10 Mobile ARM32, avec la
@@ -38,7 +39,7 @@ $extraArgs = @(
   'enable_screen_ai_service = false'
   'use_viz_debugger = false'
   'toolkit_views = false'
-  'enable_extensions = false'
+  'enable_extensions = true'  # J4 : extensions MV3 (uBO Lite)
   'enable_ipc_fuzzer = false'
   'build_with_tflite_lib = false'
   'enable_libaom = false'
@@ -78,4 +79,5 @@ if (-not $GenOnly) {
 
 & "$PSScriptRoot\..\j1-base\build-base.ps1" -OutDir 'out\content-arm' -ExtraArgs $extraArgs `
   -Targets @('rhenium_content', 'rhenium_shell') -PatchDirs @("$PSScriptRoot\patches") `
+  -V8Patches @("$PSScriptRoot\..\j1\patches\0002-v8-win-arm32.patch") `
   -ExtraRootGn "$PSScriptRoot\gn\BUILD.gn" -GenOnly:$GenOnly -KeepGoing:$KeepGoing

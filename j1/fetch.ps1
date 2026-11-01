@@ -1,4 +1,5 @@
-﻿<#
+﻿#Requires -Version 7.0
+<#
 .SYNOPSIS
   Récupère V8 11.6.189.22 (base Chromium M116) et le strict nécessaire pour compiler v8_monolith,
   sans gclient : clones superficiels aux commits du DEPS de V8, GN et ninja depuis CIPD.
@@ -9,11 +10,9 @@
   Relancer le script est sans effet sur les dépôts déjà présents.
 .EXAMPLE
   ./fetch.ps1                     # dans F:\Rhenium\v8
-  ./fetch.ps1 -WithIcu            # ajoute third_party/icu (Intl, pour les jalons suivants)
 #>
 param(
-  [string] $Dest = "$PSScriptRoot\..\v8",
-  [switch] $WithIcu
+  [string] $Dest = "$PSScriptRoot\..\v8"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -30,7 +29,6 @@ $deps = [ordered]@{
   'third_party/markupsafe'   = "$cr/chromium/src/third_party/markupsafe.git@13f4e8c9e206567eeb13bf585406ddc574005748"
   'tools/clang'              = "$cr/chromium/src/tools/clang.git@573d371dff6d798388c9b400718e4b30ad683830"
 }
-if ($WithIcu) { $deps['third_party/icu'] = "$cr/chromium/deps/icu.git@e8c3bc9ea97d4423ad0515e5f1c064f486dae8b1" }
 
 function Get-Shallow([string] $Url, [string] $Ref, [string] $Dir) {
   if (Test-Path "$Dir\.git") { Write-Host "déjà présent : $Dir"; return }
@@ -75,5 +73,4 @@ if (-not (Test-Path $lastchange)) {
 $gclientArgs = "$Dest\build\config\gclient_args.gni"
 if (-not (Test-Path $gclientArgs)) { Set-Content $gclientArgs '# Généré par Rhénium j1\fetch.ps1 (pas de gclient)' }
 
-$size = (Get-ChildItem $Dest -Recurse -File -Force | Measure-Object Length -Sum).Sum
-Write-Host ("V8 $v8Tag prêt dans $((Resolve-Path $Dest).Path) : {0:N0} Mo" -f ($size / 1MB)) -ForegroundColor Green
+Write-Host "V8 $v8Tag prêt dans $((Resolve-Path $Dest).Path)" -ForegroundColor Green

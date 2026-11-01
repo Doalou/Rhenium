@@ -103,8 +103,10 @@ void DeleteTarget(IStorageFile* file, DWORD timeout_ms) {
   }
 }
 
-// Ajoute le contenu de |path| à |bytes|. Le moteur garde son journal ouvert.
+// Ajoute à |bytes| la fin de |path| (2 Mo au plus). Le moteur garde son
+// journal ouvert.
 void AppendFile(const std::wstring& path, std::vector<BYTE>* bytes) {
+  constexpr LONGLONG kMaxBytes = 2 * 1024 * 1024;
   HANDLE file = CreateFile2(
       path.c_str(), GENERIC_READ,
       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, OPEN_EXISTING,
@@ -113,12 +115,18 @@ void AppendFile(const std::wstring& path, std::vector<BYTE>* bytes) {
     return;
   LARGE_INTEGER size = {};
   GetFileSizeEx(file, &size);
-  if (size.QuadPart > 0 && size.QuadPart < 32 * 1024 * 1024) {
-    size_t offset = bytes->size();
-    bytes->resize(offset + static_cast<size_t>(size.QuadPart));
+  LARGE_INTEGER start = {};
+  start.QuadPart = size.QuadPart > kMaxBytes ? size.QuadPart - kMaxBytes : 0;
+  const LONGLONG length = size.QuadPart - start.QuadPart;
+  if (length > 0 && SetFilePointerEx(file, start, nullptr, FILE_BEGIN)) {
+    static const char kTruncated[] = "(début tronqué)\r\n";
+    if (start.QuadPart)
+      bytes->insert(bytes->end(), kTruncated, kTruncated + sizeof(kTruncated) - 1);
+    const size_t offset = bytes->size();
+    bytes->resize(offset + static_cast<size_t>(length));
     DWORD read = 0;
-    ReadFile(file, bytes->data() + offset, static_cast<DWORD>(size.QuadPart),
-             &read, nullptr);
+    ReadFile(file, bytes->data() + offset, static_cast<DWORD>(length), &read,
+             nullptr);
     bytes->resize(offset + read);
   }
   CloseHandle(file);
@@ -126,6 +134,8 @@ void AppendFile(const std::wstring& path, std::vector<BYTE>* bytes) {
 
 // Recopie journal Rhénium puis journal du moteur, s'ils ont changé.
 void Export(DWORD timeout_ms) {
+  if (g_journal_path.empty())  // StartLogExport n'a pas tourné
+    return;
   EnterCriticalSection(&g_export_lock);
   std::vector<BYTE> bytes;
   AppendFile(g_journal_path, &bytes);
@@ -161,11 +171,11 @@ void Export(DWORD timeout_ms) {
 
 LONG WINAPI OnUnhandledException(EXCEPTION_POINTERS* pointers);
 
-// Toutes les 100 ms pendant les 20 premières secondes, puis chaque seconde.
-// Remet aussi notre filtre d'exceptions si quelqu'un l'a remplacé.
+// Chaque seconde ; un plantage exporte aussitôt. Remet aussi notre filtre
+// d'exceptions si quelqu'un l'a remplacé.
 DWORD WINAPI ExportThread(void*) {
   RoInitialize(RO_INIT_MULTITHREADED);
-  for (int round = 0;; ++round) {
+  for (;;) {
     LPTOP_LEVEL_EXCEPTION_FILTER previous =
         SetUnhandledExceptionFilter(&OnUnhandledException);
     if (previous != &OnUnhandledException) {
@@ -173,11 +183,13 @@ DWORD WINAPI ExportThread(void*) {
                     reinterpret_cast<void*>(previous));
     }
     Export(5000);
-    Sleep(round < 200 ? 100 : 1000);
+    Sleep(1000);
   }
 }
 
 void AppendToJournal(const char* text) {
+  if (g_journal_path.empty())
+    return;
   EnterCriticalSection(&g_journal_lock);
   HANDLE file = CreateFile2(
       g_journal_path.c_str(), FILE_APPEND_DATA,
@@ -323,11 +335,12 @@ LONG WINAPI OnDebugString(EXCEPTION_POINTERS* pointers) {
     // Exceptions graves, notées dès leur levée (même rattrapées ensuite), les
     // vingt premières seulement.
     static LONG noted = 0;
-    if ((record->ExceptionCode & 0xF0000000) == 0xC0000000 &&
-        InterlockedIncrement(&noted) <= 20) {
+    const LONG index = (record->ExceptionCode & 0xF0000000) == 0xC0000000
+                           ? InterlockedIncrement(&noted)
+                           : 0;
+    if (index > 0 && index <= 20) {
       const auto base = reinterpret_cast<uintptr_t>(GetModuleHandle(nullptr));
       const auto at = reinterpret_cast<uintptr_t>(record->ExceptionAddress);
-      const LONG index = noted;
       char thread[64];
       DescribeThread(thread, sizeof(thread));
       char line[256];
@@ -347,7 +360,7 @@ LONG WINAPI OnDebugString(EXCEPTION_POINTERS* pointers) {
     }
     return EXCEPTION_CONTINUE_SEARCH;
   }
-  if (text && text[0] != '[') {
+  if (text[0] != '[') {
     AppendToJournal("[debug] ");
     AppendToJournal(text);
     if (text[0] && text[strlen(text) - 1] != '\n')

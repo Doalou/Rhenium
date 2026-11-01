@@ -6,7 +6,7 @@ Le navigateur intégré à Windows 10 Mobile repose sur EdgeHTML, figé depuis 2
 
 ## Où en est le projet
 
-Rhénium tourne sur un Lumia 950 : il affiche Wikipédia, YouTube et les sites courants dans leur version mobile, avec défilement et zoom tactiles, clavier virtuel, rotation et une barre d'adresse en bas de l'écran.
+Rhénium tourne sur un Lumia 950 : il affiche Wikipédia, YouTube et les sites courants dans leur version mobile, avec défilement et zoom tactiles, clavier virtuel et rotation. L'interface reprend celle d'Edge sur Windows 10 Mobile : l'adresse en bas de l'écran, un menu « … », plusieurs onglets avec leurs aperçus et l'historique, en français ou en anglais US. uBlock Origin Lite y est installé et actif dès le premier lancement.
 
 | Jalon | Contenu | État |
 | --- | --- | --- |
@@ -14,7 +14,7 @@ Rhénium tourne sur un Lumia 950 : il affiche Wikipédia, YouTube et les sites c
 | J1 · Fondations | V8 avec JIT, `//base` de Chromium, 1 201 tests au vert sur le Lumia | Atteint |
 | J2 · Moteur | `content_shell` en un seul processus, rendu logiciel, réseau et TLS | Atteint |
 | J3 · Navigation tactile | Coquille XAML, toucher, saisie, rotation, cache disque, agent utilisateur mobile | Atteint |
-| J4 · Extensions | Extensions Manifest V3, uBlock Origin Lite installé par défaut | À venir |
+| J4 · Extensions | Extensions Manifest V3, uBlock Origin Lite installé par défaut | Atteint |
 | J5 · v1 | Onglets, historique, favoris, téléchargements, profil persistant | À venir |
 
 La lecture vidéo marche aussi : YouTube en 360p avec le son (VP9 par libvpx, AAC par Media Foundation).
@@ -43,20 +43,31 @@ Les modifications de Chromium sont gardées sous forme de correctifs (`patches\`
 | `j1-base\` | Chromium `//base` pour W10M, boucle UI sur le `CoreDispatcher`. Voir `j1-base\README.md` |
 | `j2\` | Moteur (`content_shell`), coquille XAML, empaquetage de l'app. Voir `j2\README.md` |
 | `j3\` | Notes du jalon de navigation tactile. Voir `j3\README.md` |
+| `j4\` | Extensions et uBlock Origin Lite (récupération, licence, notes). Voir `j4\README.md` |
 
-Non versionnés, recréés par les scripts : `v8\` (`j1\fetch.ps1`), `chromium\` (`j1-base\fetch.ps1`, `j2\fetch.ps1`), `toolchains\` (jonction vers LLVM), les dossiers `out\` et `sonde\certs\`.
+Non versionnés, recréés par les scripts : `chromium\` (`j1-base\fetch.ps1`, `j2\fetch.ps1`), `toolchains\` (jonction vers LLVM, gn et ninja), les dossiers `out\` (dont uBO Lite, `j4\out\ubol`), `sonde\certs\` et `v8\` (`j1\fetch.ps1`, V8 autonome des essais de J1, inutile à l'app).
 
 ## Compiler et installer
 
-Il faut une machine Windows avec Visual Studio 2022 (MSVC 14.44 et outils ARM32), le SDK Windows 10.0.19041 et LLVM, et un téléphone en mode développeur.
+Il faut une machine Windows avec Visual Studio 2022 (MSVC 14.44 et outils ARM32, ATL ARM32 du toolset 14.30), le SDK Windows 10.0.19041, LLVM, Python 3 et PowerShell 7, et un téléphone en mode développeur.
+
+Première installation, une fois :
 
 ```powershell
-cd j2
-.\build-content.ps1      # applique les correctifs, gn gen, ninja
-.\package-shell.ps1      # paquet j2\out\RheniumShell_arm.appx
-cd ..\sonde
-.\deploy.ps1 -Ip 127.0.0.1 -Appx ..\j2\out\RheniumShell_arm.appx
+.\j1-base\fetch.ps1       # arbre Chromium 116 (dépôt git local de référence), gn et ninja (CIPD) dans toolchains\
+.\j2\fetch.ps1            # reste des sources et dépôts du DEPS
+.\j4\fetch-ubol.ps1       # uBlock Origin Lite, empreinte vérifiée
 ```
+
+Puis, à chaque changement :
+
+```powershell
+.\j2\build-content.ps1 -KeepGoing   # applique les correctifs, gn gen, ninja
+.\j2\package-shell.ps1              # paquet j2\out\RheniumShell_arm.appx
+.\sonde\deploy.ps1 -Ip 127.0.0.1 -Appx .\j2\out\RheniumShell_arm.appx
+```
+
+`build-content.ps1` applique à l'arbre Chromium `j1-base\patches` (build, `//base`), `j2\patches` (le reste) et le correctif V8 de J1 (`j1\patches\0002`, dans `v8\`), chacun à un seul endroit ; les commandes pour les régénérer sont dans `j4\README.md`. Le paquet est signé par le certificat de développement `sonde\certs\RheniumDev.pfx`, créé au premier empaquetage par `sonde\dev-cert.ps1` et recréé à son expiration (il vaut trois ans).
 
 Le chemin du projet ne doit pas contenir d'accent (`F:\Rhenium`) : GN et ninja de 2023 échouent sinon.
 

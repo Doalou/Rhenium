@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 <#
 .SYNOPSIS
   Assemble a32_probe.s (A32) avec LLVM et produit a32_probe.h : octets + décalage de chaque fonction.

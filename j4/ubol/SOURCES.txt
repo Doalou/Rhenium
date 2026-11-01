@@ -1,0 +1,22 @@
+uBlock Origin Lite 2026.1018.2229
+=================================
+
+Rhénium ships uBlock Origin Lite (uBOL), unmodified, as a separate component
+installed and enabled by default. uBOL is free software by Raymond Hill and
+contributors, released under the GNU General Public License version 3
+(see LICENSE.txt in this directory, or https://www.gnu.org/licenses/gpl-3.0.html).
+
+Rhénium embarque uBlock Origin Lite, non modifié, comme composant distinct
+installé et activé par défaut. uBOL est un logiciel libre de Raymond Hill et
+de ses contributeurs, sous licence publique générale GNU version 3.
+
+Packaged extension (as shipped):
+  https://github.com/uBlockOrigin/uBOL-home/releases/tag/2026.1018.2229
+  uBOLite_2026.1018.2229.chromium.zip
+  SHA-256 c48dfa2f925ed31fdbd478d6b504432152ac995ab1e0fc96c3a008a0307dbbe2
+
+Corresponding source code:
+  https://github.com/gorhill/uBlock (platform/mv3, built with tools/make-mv3.sh),
+  at the commits listed in the release notes above, e.g.
+  https://github.com/gorhill/uBlock/commit/dfca51bea2
+  Release history: https://github.com/uBlockOrigin/uBOL-home/commits/2026.1018.2229

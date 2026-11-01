@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 <#
 .SYNOPSIS
   Enchaîne gn gen (build-content.ps1 -GenOnly) et fetch.ps1 -Missing tant que gn gen réclame

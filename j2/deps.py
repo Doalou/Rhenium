@@ -26,11 +26,6 @@ BUILTINS = {
 }
 
 
-class Var:
-  def __init__(self, name):
-    self.name = name
-
-
 def evaluate(node, variables):
   if isinstance(node, ast.Constant):
     return node.value

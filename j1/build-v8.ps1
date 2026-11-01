@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 <#
 .SYNOPSIS
   Compile V8 11.6 (v8_monolith) pour Windows ARM32 avec clang-cl (LLVM 23) et la STL MSVC 14.44.

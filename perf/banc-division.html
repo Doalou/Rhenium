@@ -1,0 +1,80 @@
+<!doctype html>
+<!-- Copyright 2026 Doalo -->
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Banc division entière</title>
+<style>
+  body { font: 16px sans-serif; margin: 16px; background: #fff; color: #000; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border-bottom: 1px solid #ccc; padding: 6px 4px; text-align: left; }
+  td.n { text-align: right; font-variant-numeric: tabular-nums; }
+  button { font-size: 18px; padding: 8px 16px; }
+  #etat { margin: 12px 0; color: #555; }
+</style>
+</head>
+<body>
+<h1>Division entière</h1>
+<p>Trois sessions indépendantes (chacune recompile tout) ; dans chaque
+session, temps médian de 5 tours après 2 tours de chauffe. En ms, plus bas =
+mieux. Les résultats vont aussi dans la console, donc dans le journal.</p>
+<button id="go">Lancer</button>
+<div id="etat"></div>
+<table>
+  <thead><tr><th>Test</th><th>ms</th><th>sessions</th></tr></thead>
+  <tbody id="res"></tbody>
+</table>
+<script>
+'use strict';
+const SESSIONS = 3;
+
+function uneSession(k) {
+  return new Promise(resolve => {
+    const f = document.createElement('iframe');
+    f.style.display = 'none';
+    const fin = e => {
+      if (e.source !== f.contentWindow) return;
+      window.removeEventListener('message', fin);
+      f.remove();
+      resolve(e.data);
+    };
+    window.addEventListener('message', fin);
+    f.src = 'banc-session.html?' + k + '-' + Date.now();
+    document.body.appendChild(f);
+  });
+}
+
+async function lancer() {
+  const res = document.getElementById('res');
+  const etat = document.getElementById('etat');
+  res.textContent = '';
+  const sessions = [];
+  for (let k = 0; k < SESSIONS; k++) {
+    etat.textContent = 'Session ' + (k + 1) + ' sur ' + SESSIONS + '…';
+    const r = await uneSession(k);
+    sessions.push(r);
+    for (const x of r) {
+      console.log('BANC s' + (k + 1) + ' ' + x.nom + ' : ' + x.ms.toFixed(1) +
+          ' ms (' + x.r + ') tours ' + x.t.map(v => v.toFixed(1)).join(' '));
+    }
+  }
+  sessions[0].forEach((x, i) => {
+    const v = sessions.map(s => s[i].ms);
+    const med = [...v].sort((a, b) => a - b)[Math.floor(v.length / 2)];
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td></td><td class="n"></td><td class="n"></td>';
+    tr.children[0].textContent = x.nom;
+    tr.children[1].textContent = med.toFixed(1);
+    tr.children[2].textContent = v.map(m => m.toFixed(1)).join(' / ');
+    res.appendChild(tr);
+    console.log('BANC ' + x.nom + ' : ' + med.toFixed(1) + ' ms, sessions ' +
+        v.map(m => m.toFixed(1)).join(' / '));
+  });
+  etat.textContent = 'Terminé.';
+}
+
+document.getElementById('go').onclick = lancer;
+</script>
+</body>
+</html>

@@ -1,5 +1,31 @@
+diff --git a/src/base/cpu.cc b/src/base/cpu.cc
+index e63896bca5..fa657e99d2 100644
+--- a/src/base/cpu.cc
++++ b/src/base/cpu.cc
+@@ -701,6 +701,21 @@ CPU::CPU()
+   }
+   has_idiva_ = (cpu_flags & ARM_CPU_FLAG_IDIV) != 0;
+ 
++#elif V8_OS_WIN
++
++  // Windows on ARM32 requires ARMv7 with VFPv3 and Thumb2.
++  architecture_ =
++      IsProcessorFeaturePresent(PF_ARM_V8_INSTRUCTIONS_AVAILABLE) ? 8 : 7;
++  has_thumb2_ = true;
++  has_fpu_ = true;
++  has_vfp_ = true;
++  has_vfp3_ = true;
++  has_vfp3_d32_ =
++      IsProcessorFeaturePresent(PF_ARM_VFP_32_REGISTERS_AVAILABLE) != 0;
++  has_neon_ = IsProcessorFeaturePresent(PF_ARM_NEON_INSTRUCTIONS_AVAILABLE) != 0;
++  has_idiva_ =
++      IsProcessorFeaturePresent(PF_ARM_DIVIDE_INSTRUCTION_AVAILABLE) != 0;
++
+ #endif  // V8_OS_LINUX
+ 
+ #elif V8_HOST_ARCH_MIPS64
 diff --git a/src/base/debug/stack_trace_win.cc b/src/base/debug/stack_trace_win.cc
-index f981bec..5c867ac 100644
+index f981bec610..5c867ac472 100644
 --- a/src/base/debug/stack_trace_win.cc
 +++ b/src/base/debug/stack_trace_win.cc
 @@ -207,6 +207,12 @@ void StackTrace::InitTrace(const CONTEXT* context_record) {
@@ -16,7 +42,7 @@ index f981bec..5c867ac 100644
    int machine_type = IMAGE_FILE_MACHINE_I386;
    stack_frame.AddrPC.Offset = context_record->Eip;
 diff --git a/src/base/immediate-crash.h b/src/base/immediate-crash.h
-index ce6240b..008bc6d 100644
+index ce6240ba06..008bc6d5a7 100644
 --- a/src/base/immediate-crash.h
 +++ b/src/base/immediate-crash.h
 @@ -92,6 +92,13 @@
@@ -34,7 +60,7 @@ index ce6240b..008bc6d 100644
  
  // Windows ARM64 uses "BRK #F000" as its breakpoint instruction, and
 diff --git a/src/base/platform/platform-win32.cc b/src/base/platform/platform-win32.cc
-index 152fbbf..ff79a5b 100644
+index 152fbbf3c2..ff79a5b7e1 100644
 --- a/src/base/platform/platform-win32.cc
 +++ b/src/base/platform/platform-win32.cc
 @@ -24,6 +24,7 @@
@@ -296,7 +322,7 @@ index 152fbbf..ff79a5b 100644
  #else
    return __builtin_frame_address(0);
 diff --git a/src/base/platform/time.cc b/src/base/platform/time.cc
-index b6da0a6..66bd04f 100644
+index b6da0a690c..66bd04fd7c 100644
 --- a/src/base/platform/time.cc
 +++ b/src/base/platform/time.cc
 @@ -705,7 +705,7 @@ TimeTicks InitialTimeTicksNowFunction() {
@@ -333,7 +359,7 @@ index b6da0a6..66bd04f 100644
    DCHECK(IsSupported());
  
 diff --git a/src/base/platform/time.h b/src/base/platform/time.h
-index 9a41d49..da34a92 100644
+index 9a41d49b2c..da34a92fa4 100644
 --- a/src/base/platform/time.h
 +++ b/src/base/platform/time.h
 @@ -493,7 +493,7 @@ class V8_BASE_EXPORT ThreadTicks final
@@ -346,7 +372,7 @@ index 9a41d49..da34a92 100644
    // cycle-counting methods use the actual CPU cycle count, and not a consistent
    // incrementing counter.
 diff --git a/src/codegen/arm/constants-arm.h b/src/codegen/arm/constants-arm.h
-index d8d52f1..cf44476 100644
+index d8d52f154d..cf44476c8f 100644
 --- a/src/codegen/arm/constants-arm.h
 +++ b/src/codegen/arm/constants-arm.h
 @@ -14,7 +14,9 @@
@@ -361,7 +387,7 @@ index d8d52f1..cf44476 100644
  #endif
  
 diff --git a/src/codegen/arm/cpu-arm.cc b/src/codegen/arm/cpu-arm.cc
-index 6fc1dd9..38e666c 100644
+index 6fc1dd9659..38e666cd1f 100644
 --- a/src/codegen/arm/cpu-arm.cc
 +++ b/src/codegen/arm/cpu-arm.cc
 @@ -12,6 +12,10 @@
@@ -386,7 +412,7 @@ index 6fc1dd9..38e666c 100644
    register uint32_t beg asm("r0") = reinterpret_cast<uint32_t>(start);
    register uint32_t end asm("r1") = beg + size;
 diff --git a/src/codegen/arm/macro-assembler-arm.cc b/src/codegen/arm/macro-assembler-arm.cc
-index b264415..8d17389 100644
+index b264415359..8d1738918f 100644
 --- a/src/codegen/arm/macro-assembler-arm.cc
 +++ b/src/codegen/arm/macro-assembler-arm.cc
 @@ -1596,6 +1596,10 @@ void MacroAssembler::InvokePrologue(Register expected_parameter_count,
@@ -401,7 +427,7 @@ index b264415..8d17389 100644
      bind(&copy);
      ldr(scratch, MemOperand(src, kSystemPointerSize, PostIndex));
 diff --git a/src/common/globals.h b/src/common/globals.h
-index ef9904f..7e94a34 100644
+index ef9904f3fc..7e94a3413e 100644
 --- a/src/common/globals.h
 +++ b/src/common/globals.h
 @@ -275,6 +275,18 @@ const size_t kShortBuiltinCallsOldSpaceSizeThreshold = size_t{2} * GB;
@@ -424,7 +450,7 @@ index ef9904f..7e94a34 100644
  #if V8_HAS_PKU_JIT_WRITE_PROTECT && \
      !(defined(V8_COMPRESS_POINTERS) && !defined(V8_EXTERNAL_CODE_SPACE))
 diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
-index 3db3d7e..f959b73 100644
+index 3db3d7ed37..f959b73717 100644
 --- a/src/execution/isolate.cc
 +++ b/src/execution/isolate.cc
 @@ -168,7 +168,17 @@ namespace internal {
@@ -446,7 +472,7 @@ index 3db3d7e..f959b73 100644
  uint32_t DefaultEmbeddedBlobCodeSize() {
    return v8_Default_embedded_blob_code_size_;
 diff --git a/src/heap/base/asm/arm/push_registers_asm.cc b/src/heap/base/asm/arm/push_registers_asm.cc
-index 5246c3f..8aadec2 100644
+index 5246c3f6c3..8aadec2fe6 100644
 --- a/src/heap/base/asm/arm/push_registers_asm.cc
 +++ b/src/heap/base/asm/arm/push_registers_asm.cc
 @@ -18,8 +18,18 @@
@@ -469,7 +495,7 @@ index 5246c3f..8aadec2 100644
      // Push all callee-saved registers and save return address.
      // Only {r4-r11} are callee-saved registers. Push r3 in addition to align
 diff --git a/src/heap/factory.cc b/src/heap/factory.cc
-index 10c1847..1ffa22f 100644
+index 10c184779e..1ffa22fb04 100644
 --- a/src/heap/factory.cc
 +++ b/src/heap/factory.cc
 @@ -165,8 +165,11 @@ MaybeHandle<Code> Factory::CodeBuilder::BuildInternal(
@@ -510,7 +536,7 @@ index 10c1847..1ffa22f 100644
          *local_isolate_->factory()->instruction_stream_map(),
          SKIP_WRITE_BARRIER);
 diff --git a/src/heap/free-list.cc b/src/heap/free-list.cc
-index f373921..131d0a7 100644
+index f373921cff..131d0a7a2f 100644
 --- a/src/heap/free-list.cc
 +++ b/src/heap/free-list.cc
 @@ -56,8 +56,10 @@ FreeSpace FreeListCategory::SearchForNodeInList(size_t minimum_size,
@@ -537,7 +563,7 @@ index f373921..131d0a7 100644
    }
    set_top(free_space);
 diff --git a/src/heap/heap-inl.h b/src/heap/heap-inl.h
-index 1f9c6db..eb8aa96 100644
+index 1f9c6db9a7..eb8aa967b2 100644
 --- a/src/heap/heap-inl.h
 +++ b/src/heap/heap-inl.h
 @@ -571,8 +571,16 @@ CodePageMemoryModificationScope::CodePageMemoryModificationScope(
@@ -596,7 +622,7 @@ index 1f9c6db..eb8aa96 100644
  #endif
  }
 diff --git a/src/heap/heap.cc b/src/heap/heap.cc
-index c88c264..035fb7c 100644
+index c88c2642e0..035fb7c7aa 100644
 --- a/src/heap/heap.cc
 +++ b/src/heap/heap.cc
 @@ -3141,8 +3141,14 @@ void CreateFillerObjectAtImpl(Heap* heap, Address addr, int size,
@@ -616,7 +642,7 @@ index c88c264..035fb7c 100644
    // TODO(v8:13070): Filler sizes are irrelevant for 8GB+ heaps. Adding them
    // should be avoided in this mode.
 diff --git a/src/heap/heap.h b/src/heap/heap.h
-index ea71b9c..59f94ba 100644
+index ea71b9c2cf..59f94ba23d 100644
 --- a/src/heap/heap.h
 +++ b/src/heap/heap.h
 @@ -2555,6 +2555,11 @@ class V8_NODISCARD CodePageMemoryModificationScope {
@@ -641,7 +667,7 @@ index ea71b9c..59f94ba 100644
    base::Optional<base::MutexGuard> guard_;
  #endif
 diff --git a/src/heap/memory-chunk.cc b/src/heap/memory-chunk.cc
-index 0fc34c1..84ad814 100644
+index 0fc34c12a1..84ad814227 100644
 --- a/src/heap/memory-chunk.cc
 +++ b/src/heap/memory-chunk.cc
 @@ -101,6 +101,62 @@ void MemoryChunk::SetDefaultCodePermissions() {
@@ -708,7 +734,7 @@ index 0fc34c1..84ad814 100644
                           Address area_start, Address area_end,
                           VirtualMemory reservation, Executability executable,
 diff --git a/src/heap/memory-chunk.h b/src/heap/memory-chunk.h
-index 453b540..c3b21d9 100644
+index 453b540003..c3b21d9726 100644
 --- a/src/heap/memory-chunk.h
 +++ b/src/heap/memory-chunk.h
 @@ -188,6 +188,15 @@ class MemoryChunk : public BasicMemoryChunk {
@@ -728,7 +754,7 @@ index 453b540..c3b21d9 100644
    const heap::ListNode<MemoryChunk>& list_node() const { return list_node_; }
  
 diff --git a/src/libsampler/sampler.cc b/src/libsampler/sampler.cc
-index 83028c9..014b0a3 100644
+index 83028c9ee8..014b0a3d13 100644
 --- a/src/libsampler/sampler.cc
 +++ b/src/libsampler/sampler.cc
 @@ -612,6 +612,12 @@ void Sampler::DoSample() {
@@ -745,7 +771,7 @@ index 83028c9..014b0a3 100644
      state.pc = reinterpret_cast<void*>(context.Eip);
      state.sp = reinterpret_cast<void*>(context.Esp);
 diff --git a/src/snapshot/embedded/platform-embedded-file-writer-win.cc b/src/snapshot/embedded/platform-embedded-file-writer-win.cc
-index 39a9935..70a735a 100644
+index 39a99354a8..70a735ad22 100644
 --- a/src/snapshot/embedded/platform-embedded-file-writer-win.cc
 +++ b/src/snapshot/embedded/platform-embedded-file-writer-win.cc
 @@ -42,7 +42,9 @@ namespace internal {
@@ -760,7 +786,7 @@ index 39a9935..70a735a 100644
  #else
  #define SYMBOL_PREFIX ""
 diff --git a/src/utils/memcopy.cc b/src/utils/memcopy.cc
-index 591a6a5..dc508fd 100644
+index 591a6a514d..dc508fdd33 100644
 --- a/src/utils/memcopy.cc
 +++ b/src/utils/memcopy.cc
 @@ -25,7 +25,9 @@ V8_EXPORT_PRIVATE void MemMove(void* dest, const void* src, size_t size) {
@@ -785,7 +811,7 @@ index 591a6a5..dc508fd 100644
      EmbeddedData d = EmbeddedData::FromBlob();
      memcopy_uint8_function = reinterpret_cast<MemCopyUint8Function>(
 diff --git a/src/utils/utils.cc b/src/utils/utils.cc
-index e0b6270..d8da3dc 100644
+index e0b6270c5c..d8da3dc610 100644
 --- a/src/utils/utils.cc
 +++ b/src/utils/utils.cc
 @@ -220,7 +220,7 @@ bool DoubleToBoolean(double d) {

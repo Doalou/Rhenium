@@ -27,6 +27,7 @@
 #include "base/command_line.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
+#include "base/no_destructor.h"
 #include "base/path_service.h"
 #include "base/strings/escape.h"
 #include "base/strings/string_number_conversions.h"
@@ -34,12 +35,18 @@
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
+#include "components/prefs/pref_service.h"
+#include "components/user_prefs/user_prefs.h"
+#include "components/version_info/version_info.h"
 #include "content/public/app/content_main.h"
+#include "content/public/browser/browser_context.h"
 #include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/web_contents.h"
-#include "content/shell/app/shell_main_delegate.h"
 #include "content/shell/browser/shell.h"
 #include "content/shell/browser/shell_uwp_host.h"
+#include "extensions/rhenium/rhenium_extension_manager.h"
+#include "extensions/rhenium/rhenium_main_delegate.h"
+#include "extensions/rhenium/rhenium_tab_model.h"
 #include "rhenium/log_export_uwp.h"
 #include "sandbox/win/src/sandbox_types.h"
 #include "ui/aura/window.h"
@@ -54,19 +61,20 @@
 
 namespace {
 
-// Recherche quand le texte de la barre n'est pas une adresse.
-constexpr char kSearchUrl[] = "https://duckduckgo.com/?q=";
+// Recherche quand le texte de la barre n'est pas une adresse : préfixe auquel
+// s'ajoute le texte, choisi dans les paramètres (RheniumEngineSetSearchUrl).
+constexpr char kDefaultSearchUrl[] = "https://duckduckgo.com/?q=";
+
+std::string& SearchUrl() {
+  static base::NoDestructor<std::string> url(kDefaultSearchUrl);
+  return *url;
+}
 
 // Échelle de rendu au plus : au-delà, la rastérisation logicielle coûte plus
 // qu'elle n'apporte à l'œil sur un écran de téléphone. La swap chain est
 // agrandie à l'échelle de l'écran par la composition.
 // --rhenium-render-scale=<n> la fixe (4 : définition native du Lumia 950).
 constexpr float kMaxRenderScale = 3.0f;
-
-content::Shell* GetShell() {
-  auto& windows = content::Shell::windows();
-  return windows.empty() ? nullptr : windows.front();
-}
 
 GURL UrlFromText(const std::u16string& raw) {
   const std::string text =
@@ -87,15 +95,20 @@ GURL UrlFromText(const std::u16string& raw) {
     if (guessed.is_valid())
       return guessed;
   }
-  return GURL(kSearchUrl + base::EscapeQueryParamValue(text, /*use_plus=*/true));
+  return GURL(SearchUrl() +
+              base::EscapeQueryParamValue(text, /*use_plus=*/true));
+}
+
+base::FilePath LocalState() {
+  base::FilePath local_state;
+  base::PathService::Get(base::DIR_LOCAL_APP_DATA, &local_state);
+  return local_state;
 }
 
 void BuildCommandLine(const RheniumHost& host) {
   base::CommandLine::Init(0, nullptr);
   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
-
-  base::FilePath local_state;
-  base::PathService::Get(base::DIR_LOCAL_APP_DATA, &local_state);
+  const base::FilePath local_state = LocalState();
 
   // Rendu, réseau et GPU en threads, compositing logiciel sans GL, présenté
   // dans le SwapChainPanel de la coquille, qui fixe la taille de la fenêtre
@@ -107,24 +120,30 @@ void BuildCommandLine(const RheniumHost& host) {
   command_line->AppendSwitch("enable-viewport");
   command_line->AppendSwitch("use-mobile-user-agent");
   command_line->AppendSwitchASCII("enable-features", "OverlayScrollbar");
+  // Sans cela, la page du Chrome Web Store reçoit chrome.management, dont
+  // Rhénium n'a pas le délégué (plantage dans management_api.cc).
+  command_line->AppendSwitchASCII("disable-features", "NewWebstoreDomain");
   command_line->AppendSwitchASCII(
       "content-shell-host-window-size",
       base::StringPrintf("%dx%d", static_cast<int>(host.width_dip),
                          static_cast<int>(host.height_dip)));
   command_line->AppendSwitch("disable-gpu");
-  command_line->AppendSwitch("disable-software-rasterizer");
   command_line->AppendSwitch("disable-gpu-compositing");
-  command_line->AppendSwitch("disable-legacy-window");
-  const base::FilePath log_file = local_state.AppendASCII("content_shell.log");
-  command_line->AppendSwitchPath("log-file", log_file);
-  rhenium::StartLogExport(local_state.AppendASCII("rhenium.log").value(),
-                          log_file.value());
+  command_line->AppendSwitchPath("log-file",
+                                 local_state.AppendASCII("content_shell.log"));
   command_line->AppendSwitchPath("data-path", local_state.AppendASCII("data"));
+  // Pas --lang, qui changerait aussi les .pak chargés.
+  if (host.language && *host.language) {
+    command_line->AppendSwitchASCII("rhenium-language",
+                                    base::WideToASCII(host.language));
+  }
 
   bool has_url = false;
   std::string extra;
   if (base::ReadFileToString(local_state.AppendASCII("rhenium-args.txt"),
                              &extra)) {
+    if (base::StartsWith(extra, "\xEF\xBB\xBF"))  // BOM du Bloc-notes
+      extra.erase(0, 3);
     for (const auto& line :
          base::SplitString(extra, "\r\n", base::TRIM_WHITESPACE,
                            base::SPLIT_WANT_NONEMPTY)) {
@@ -149,27 +168,6 @@ void BuildCommandLine(const RheniumHost& host) {
                 base::WideToUTF8(command_line->GetCommandLineString()).c_str());
 }
 
-base::FilePath LocalState() {
-  base::FilePath local_state;
-  base::PathService::Get(base::DIR_LOCAL_APP_DATA, &local_state);
-  return local_state;
-}
-
-}  // namespace
-
-extern "C" void RheniumEngineStartLog() {
-  const base::FilePath local_state = LocalState();
-  if (local_state.empty())
-    return;  // ApplicationData demande un apartment COM
-  rhenium::StartLogExport(local_state.AppendASCII("rhenium.log").value(),
-                          local_state.AppendASCII("content_shell.log").value());
-}
-
-extern "C" void RheniumEngineNote(const wchar_t* text) {
-  rhenium::Note("%s", base::WideToUTF8(text ? text : L"").c_str());
-  rhenium::FlushNow();
-}
-
 float RenderScale(float screen_scale) {
   double forced = 0;
   if (base::StringToDouble(
@@ -187,14 +185,47 @@ gfx::Size ToPixels(float width_dip, float height_dip, float scale) {
                    static_cast<int>(std::lround(height_dip * scale)));
 }
 
+// Rappel de la coquille pour la fin d'une installation d'extension.
+void (*g_extension_installed)(void* context, int ok, const wchar_t* text) =
+    nullptr;
+
+// La page d'extension, si elle est ouverte, sinon l'onglet actif.
+content::WebContents* GetTopWebContents() {
+  if (content::WebContents* overlay = rhenium::GetOverlayWebContents())
+    return overlay;
+  return rhenium::GetActiveWebContents();
+}
+
+}  // namespace
+
+extern "C" void RheniumEngineStartLog() {
+  const base::FilePath local_state = LocalState();
+  if (local_state.empty())
+    return;  // ApplicationData demande un apartment COM
+  rhenium::StartLogExport(local_state.AppendASCII("rhenium.log").value(),
+                          local_state.AppendASCII("content_shell.log").value());
+}
+
+extern "C" void RheniumEngineNote(const wchar_t* text) {
+  rhenium::Note("%s", base::WideToUTF8(text ? text : L"").c_str());
+  rhenium::FlushNow();
+}
+
 extern "C" int RheniumEngineRun(const RheniumHost* host) {
+  RheniumEngineStartLog();  // sans effet si la coquille l'a déjà fait
   BuildCommandLine(*host);
   const float scale = RenderScale(host->scale > 0 ? host->scale : 1.0f);
   rhenium::Note("échelle de rendu %.2f (écran %.2f)", scale, host->scale);
+  // Ce que V8 lit pour choisir ses instructions (v8/src/base/cpu.cc).
+  rhenium::Note(
+      "processeur : division %d, NEON %d, VFP 32 registres %d, ARMv8 %d",
+      IsProcessorFeaturePresent(PF_ARM_DIVIDE_INSTRUCTION_AVAILABLE),
+      IsProcessorFeaturePresent(PF_ARM_NEON_INSTRUCTIONS_AVAILABLE),
+      IsProcessorFeaturePresent(PF_ARM_VFP_32_REGISTERS_AVAILABLE),
+      IsProcessorFeaturePresent(PF_ARM_V8_INSTRUCTIONS_AVAILABLE));
   gfx::uwp::SetHostedContentArea(
-      gfx::Size(static_cast<int>(std::lround(host->width_dip * scale)),
-                static_cast<int>(std::lround(host->height_dip * scale))),
-      scale, host->attach_swap_chain, host->context);
+      ToPixels(host->width_dip, host->height_dip, scale), scale,
+      host->attach_swap_chain, host->context);
   content::ShellUwpHost shell_host;
   shell_host.context = host->context;
   shell_host.url_changed = host->url_changed;
@@ -205,7 +236,21 @@ extern "C" int RheniumEngineRun(const RheniumHost* host) {
 
   // Pas de broker : en single-process, aucun processus n'est lancé.
   sandbox::SandboxInterfaceInfo sandbox_info = {nullptr};
-  content::ShellMainDelegate delegate;
+  rhenium::TabObserver tabs;
+  tabs.context = host->context;
+  tabs.tabs_changed = host->tabs_changed;
+  tabs.page_visited = host->page_visited;
+  tabs.tab_thumbnail = host->tab_thumbnail;
+  rhenium::InitTabs(tabs);
+  rhenium::ExtensionObserver extensions;
+  extensions.context = host->context;
+  extensions.install_done = [](void* context, bool ok, const wchar_t* text) {
+    if (g_extension_installed)
+      g_extension_installed(context, ok ? 1 : 0, text);
+  };
+  g_extension_installed = host->extension_installed;
+  rhenium::InitExtensions(extensions);
+  rhenium::RheniumMainDelegate delegate;
   content::ContentMainParams params(&delegate);
   params.instance = GetModuleHandle(nullptr);
   params.sandbox_info = &sandbox_info;
@@ -216,30 +261,66 @@ extern "C" int RheniumEngineRun(const RheniumHost* host) {
 }
 
 extern "C" void RheniumEngineNavigate(const wchar_t* text) {
-  content::Shell* shell = GetShell();
+  content::Shell* shell = rhenium::GetActiveShell();
   const GURL url = UrlFromText(base::WideToUTF16(text ? text : L""));
-  if (shell && url.is_valid())
+  if (shell && url.is_valid()) {
+    rhenium::CloseOverlay();
     shell->LoadURL(url);
+  }
 }
 
-extern "C" void RheniumEngineGoBack() {
-  if (content::Shell* shell = GetShell())
-    shell->GoBackOrForward(-1);
+extern "C" int RheniumEngineGoBack() {
+  return rhenium::GoBack() ? 1 : 0;
 }
 
 extern "C" void RheniumEngineGoForward() {
-  if (content::Shell* shell = GetShell())
+  if (content::Shell* shell = rhenium::GetActiveShell())
     shell->GoBackOrForward(1);
 }
 
 extern "C" void RheniumEngineReload() {
-  if (content::Shell* shell = GetShell())
+  if (content::Shell* shell = rhenium::GetActiveShell())
     shell->Reload();
 }
 
 extern "C" void RheniumEngineStop() {
-  if (content::Shell* shell = GetShell())
+  if (content::Shell* shell = rhenium::GetActiveShell())
     shell->Stop();
+}
+
+extern "C" int RheniumEngineNewTab(const wchar_t* text) {
+  return rhenium::OpenTab(UrlFromText(base::WideToUTF16(text ? text : L"")))
+             ? 1
+             : 0;
+}
+
+extern "C" int RheniumEngineRestoreTab(const wchar_t* url,
+                                       const wchar_t* title) {
+  return rhenium::RestoreTab(GURL(base::WideToUTF8(url ? url : L"")),
+                             base::WideToUTF16(title ? title : L""))
+             ? 1
+             : 0;
+}
+
+extern "C" void RheniumEngineActivateTab(int id) {
+  rhenium::ActivateTab(id);
+}
+
+extern "C" int RheniumEngineCloseTab(int id) {
+  return rhenium::CloseTab(id) ? 1 : 0;
+}
+
+extern "C" void RheniumEngineListTabs(void (*visit)(void* context,
+                                                    int id,
+                                                    int active,
+                                                    const wchar_t* title,
+                                                    const wchar_t* url),
+                                      void* context) {
+  rhenium::ForEachTab(visit, context);
+}
+
+extern "C" void RheniumEngineCaptureTab() {
+  rhenium::CaptureActiveTab();
 }
 
 extern "C" void RheniumEnginePointer(int kind,
@@ -266,12 +347,81 @@ extern "C" void RheniumEnginePointer(int kind,
 
 extern "C" void RheniumEngineSetWebFocus(int focused) {
   ui::SetHostedWebFocus(focused != 0);
-  content::Shell* shell = GetShell();
-  if (focused && shell)
-    shell->web_contents()->Focus();
+  content::WebContents* web_contents = GetTopWebContents();
+  if (focused && web_contents)
+    web_contents->Focus();
+}
+
+extern "C" int RheniumEngineOpenExtensionPopup() {
+  return rhenium::OpenActionPopup() ? 1 : 0;
+}
+
+extern "C" int RheniumEngineOpenExtensionOptions() {
+  return rhenium::OpenOptionsPage() ? 1 : 0;
+}
+
+extern "C" void RheniumEngineListExtensions(
+    void (*visit)(void* context,
+                  const char* id,
+                  const wchar_t* name,
+                  const wchar_t* version,
+                  int enabled,
+                  int removable,
+                  int has_popup,
+                  int has_options),
+    void* context) {
+  rhenium::ForEachExtension(visit, context);
+}
+
+extern "C" int RheniumEngineSetExtensionEnabled(const char* id, int enabled) {
+  return rhenium::SetExtensionEnabled(id ? id : "", enabled != 0) ? 1 : 0;
+}
+
+extern "C" int RheniumEngineUninstallExtension(const char* id) {
+  return rhenium::UninstallExtension(id ? id : "") ? 1 : 0;
+}
+
+extern "C" int RheniumEngineOpenExtensionPopupFor(const char* id) {
+  return rhenium::OpenExtensionPopup(id ? id : "") ? 1 : 0;
+}
+
+extern "C" int RheniumEngineOpenExtensionOptionsFor(const char* id) {
+  return rhenium::OpenExtensionOptions(id ? id : "") ? 1 : 0;
+}
+
+extern "C" int RheniumEngineWebStoreId(const wchar_t* url, char id[33]) {
+  const std::string found =
+      rhenium::WebStoreExtensionId(GURL(base::WideToUTF16(url ? url : L"")));
+  if (found.size() != 32)
+    return 0;
+  std::copy(found.begin(), found.end(), id);
+  id[32] = 0;
+  return 1;
+}
+
+extern "C" int RheniumEngineInstallExtension(const char* id) {
+  return rhenium::InstallFromWebStore(id ? id : "") ? 1 : 0;
+}
+
+// Appelée avant ContentMain : pas de GURL ici, sa première utilisation fige
+// les schémas que content enregistre ensuite (CHECK dans url_util.cc).
+extern "C" void RheniumEngineSetSearchUrl(const wchar_t* prefix) {
+  const std::string url = base::WideToUTF8(prefix ? prefix : L"");
+  SearchUrl() = base::StartsWith(url, "https://") ||
+                        base::StartsWith(url, "http://")
+                    ? url
+                    : kDefaultSearchUrl;
+}
+
+extern "C" const wchar_t* RheniumEngineChromiumVersion() {
+  static const base::NoDestructor<std::wstring> version(
+      base::ASCIIToWide(version_info::GetVersionNumber()));
+  return version->c_str();
 }
 
 extern "C" void RheniumEngineResize(float width_dip, float height_dip) {
+  if (!gfx::uwp::IsHosted())  // moteur pas encore lancé : il lira la taille
+    return;
   const float scale = gfx::uwp::GetHostedScale();
   const gfx::Size pixels = ToPixels(width_dip, height_dip, scale);
   rhenium::Note("zone de contenu %.0fx%.0f DIP", width_dip, height_dip);
@@ -291,11 +441,11 @@ extern "C" void RheniumEngineResize(float width_dip, float height_dip) {
 }
 
 extern "C" void RheniumEngineSetKeyboardInset(float bottom_dip) {
-  content::Shell* shell = GetShell();
-  if (!shell)
+  content::WebContents* web_contents = GetTopWebContents();
+  if (!web_contents)
     return;
   if (content::RenderWidgetHostView* view =
-          shell->web_contents()->GetRenderWidgetHostView()) {
+          web_contents->GetRenderWidgetHostView()) {
     view->SetInsets(gfx::Insets::TLBR(
         0, 0, static_cast<int>(std::lround(std::max(0.0f, bottom_dip))), 0));
   }
@@ -303,10 +453,12 @@ extern "C" void RheniumEngineSetKeyboardInset(float bottom_dip) {
 
 extern "C" void RheniumEngineSetVisible(int visible) {
   rhenium::Note(visible ? "app visible" : "app masquée");
-  for (content::Shell* shell : content::Shell::windows()) {
-    if (visible)
-      shell->web_contents()->WasShown();
-    else
-      shell->web_contents()->WasHidden();
+  rhenium::SetAppVisible(visible != 0);
+  // Une app masquée peut être tuée sans arrêt propre : les préférences
+  // (règles et permissions des extensions) sont écrites tout de suite.
+  content::WebContents* web_contents = rhenium::GetActiveWebContents();
+  if (web_contents && !visible) {
+    user_prefs::UserPrefs::Get(web_contents->GetBrowserContext())
+        ->CommitPendingWrite();
   }
 }

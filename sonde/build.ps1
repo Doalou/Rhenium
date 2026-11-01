@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 <#
 .SYNOPSIS
   Compile et empaquette la sonde Rhénium en .appx signé.
@@ -61,8 +62,8 @@ if (-not $sdk) {
 }
 $sdkVer = $sdk.Name
 $inc = "$kits\Include\$sdkVer"
-# C++/WinRT : toujours le plus récent (ceux d'avant 2020 exigent les coroutines expérimentales, refusées en C++20)
-$cppwinrt = (Get-Newest (Get-ChildItem "$kits\Include" -Directory | Where-Object { Test-Path "$($_.FullName)\cppwinrt\winrt\base.h" })).FullName + '\cppwinrt'
+. "$root\cppwinrt-arm32.ps1"
+$cppwinrt = Find-CppWinrt $kits
 $sdkBin = (Get-Newest (Get-ChildItem "$kits\bin" -Directory | Where-Object { Test-Path "$($_.FullName)\x64\makeappx.exe" })).FullName + '\x64'
 
 # --- Toolset MSVC : le plus récent qui cible encore l'architecture (14.44 pour ARM32)
@@ -100,20 +101,10 @@ $pkg = "$out\pkg"
 Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $obj, $pkg | Out-Null
 
-# C++/WinRT récent a retiré ARM32 : on rajoute la branche _M_ARM dans une copie de base.h,
-# placée devant celle du SDK dans les chemins d'inclusion (le SDK n'est pas modifié).
+# C++/WinRT récent a retiré ARM32 : copie corrigée de base.h, devant celle du SDK.
 $includeFirst = @()
 if ($Arch -eq 'arm') {
-  $base = Get-Content "$cppwinrt\winrt\base.h" -Raw
-  $arm32Read = "#elif defined _M_ARM`n        int32_t const result = __iso_volatile_load32(reinterpret_cast<int32_t const volatile*>(target));`n" +
-    "        __dmb(_ARM_BARRIER_ISH);`n        return result;`n`$0"
-  $patched = [regex]::new('#else\r?\n#error Unsupported architecture\r?\n').Replace($base, $arm32Read, 1)
-  $patched = $patched.Replace('#if !defined _M_IX86 && !defined _M_X64 && !defined _M_ARM64', '#if !defined _M_IX86 && !defined _M_X64 && !defined _M_ARM64 && !defined _M_ARM')
-  if ($patched -notmatch 'defined _M_ARM\r?\n        int32_t' -or $patched -notmatch '!defined _M_ARM\r?\n') {
-    throw "Le correctif ARM32 de C++/WinRT ne s'applique plus à $cppwinrt\winrt\base.h"
-  }
-  New-Item -ItemType Directory -Force "$out\cppwinrt-arm32\winrt" | Out-Null
-  Set-Content "$out\cppwinrt-arm32\winrt\base.h" $patched -NoNewline -Encoding utf8
+  Write-CppWinrtArm32 $cppwinrt "$out\cppwinrt-arm32"
   $includeFirst = @("/I$out\cppwinrt-arm32")
 }
 
@@ -265,23 +256,8 @@ $appx = "$root\out\RheniumSonde_$Arch-$Compiler$suffix.appx"
 Invoke-Tool "$sdkBin\makeappx.exe" @('pack', '/d', $pkg, '/p', $appx, '/o')
 Copy-Item $exe ($appx -replace '\.appx$', '.exe') -Force  # pour -ImportCheck : out\<arch>-<compilateur> est vidé à chaque build
 
-# --- Signature avec un certificat de développement local (créé au premier build, hors magasin Windows)
-$pfx = "$root\certs\RheniumDev.pfx"
-if (-not (Test-Path $pfx)) {
-  New-Item -ItemType Directory -Force "$root\certs" | Out-Null
-  $rsa = [System.Security.Cryptography.RSA]::Create(2048)
-  $req = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=Rhenium Dev', $rsa,
-    [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
-  $req.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($false, $false, 0, $true))
-  $req.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new(
-      [System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::DigitalSignature, $true))
-  $eku = [System.Security.Cryptography.OidCollection]::new()
-  [void] $eku.Add([System.Security.Cryptography.Oid]::new('1.3.6.1.5.5.7.3.3'))  # signature de code
-  $req.CertificateExtensions.Add([System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($eku, $false))
-  $cert = $req.CreateSelfSigned([DateTimeOffset]::Now.AddDays(-1), [DateTimeOffset]::Now.AddYears(3))
-  [IO.File]::WriteAllBytes($pfx, $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx))
-  [IO.File]::WriteAllBytes("$root\certs\RheniumDev.cer", $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
-}
+# --- Signature avec le certificat de développement local (dev-cert.ps1, hors magasin Windows)
+$pfx = & "$root\dev-cert.ps1"
 Invoke-Tool "$sdkBin\signtool.exe" @('sign', '/q', '/fd', 'SHA256', '/f', $pfx, $appx)
 
 Write-Host "Paquet prêt : $appx" -ForegroundColor Green

@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 <#
 .SYNOPSIS
   Récupère les sources de Chromium 116.0.5845.228 utiles à content_shell, dans ..\chromium\src

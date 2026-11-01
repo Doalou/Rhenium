@@ -8,6 +8,8 @@ group("rhenium_content") {
     "//content/shell:content_shell_app",
     "//content/shell:content_shell_lib",
     "//content/shell:pak",
+    "//extensions/rhenium",
+    "//extensions/rhenium:pak",
     "//tools/v8_context_snapshot:v8_context_snapshot",
   ]
 }
@@ -17,7 +19,8 @@ group("rhenium_content") {
 # moteur (rhenium/engine_uwp.cc et l'API C rhenium_engine.h, copiés depuis
 # ..\j2\app par build-content.ps1), et remplacements des imports absents de
 # Windows 10 Mobile (..\j1\app\w10m_imports.cc). Empaquetée par
-# ..\j2\package-shell.ps1.
+# ..\j2\package-shell.ps1. J4 : système d'extensions (//extensions/rhenium,
+# patch 0003) et uBlock Origin Lite.
 executable("rhenium_shell") {
   testonly = true
   sources = [
@@ -29,11 +32,15 @@ executable("rhenium_shell") {
   ]
   deps = [
     "//base",
+    "//components/prefs",
+    "//components/user_prefs",
+    "//components/version_info",
     "//content/public/app",
     "//content/public/browser",
     "//content/shell:content_shell_app",
     "//content/shell:content_shell_lib",
     "//content/shell:pak",
+    "//extensions/rhenium",
     "//sandbox",
     "//ui/aura",
     "//ui/display",
@@ -42,7 +49,10 @@ executable("rhenium_shell") {
     "//ui/platform_window/uwp",
     "//url",
   ]
-  data_deps = [ "//content/shell:pak" ]
+  data_deps = [
+    "//content/shell:pak",
+    "//extensions/rhenium:pak",
+  ]
   defines = [ "RHENIUM_SHELL" ]
   configs -= [ "//build/config/win:console" ]
   configs += [
