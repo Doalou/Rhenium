@@ -110,6 +110,19 @@ void RheniumEngineCaptureTab(void);
  * recharge à son activation. 0 s'il n'y avait plus d'onglet à décharger. */
 int RheniumEngineDiscardTab(void);
 
+/* Version pour ordinateur (agent utilisateur de Chrome pour Windows) plutôt
+ * que mobile : réglage de l'app, possible avant RheniumEngineRun, qui vaut
+ * pour les onglets ouverts dès leur prochain chargement ; puis choix pour
+ * l'onglet actif, qui recharge sa page. */
+void RheniumEngineSetDesktopSites(int desktop);
+int RheniumEngineIsTabDesktop(void);
+void RheniumEngineSetTabDesktop(int desktop);
+
+/* Thème des pages (prefers-color-scheme : dark si `dark`) ; en thème sombre,
+ * `force_dark` assombrit aussi les pages claires. Possible avant
+ * RheniumEngineRun, appliqué tout de suite ensuite. */
+void RheniumEngineSetDarkMode(int dark, int force_dark);
+
 /* Popup ou page d'options de l'extension (uBlock Origin Lite), par-dessus la
  * page et fermés par GoBack ; 0 si aucune extension n'en a. */
 int RheniumEngineOpenExtensionPopup(void);

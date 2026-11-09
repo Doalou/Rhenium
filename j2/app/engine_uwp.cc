@@ -345,6 +345,22 @@ extern "C" int RheniumEngineDiscardTab() {
   return rhenium::DiscardTab() ? 1 : 0;
 }
 
+extern "C" void RheniumEngineSetDesktopSites(int desktop) {
+  rhenium::SetDesktopSites(desktop != 0);
+}
+
+extern "C" int RheniumEngineIsTabDesktop() {
+  return rhenium::IsActiveTabDesktop() ? 1 : 0;
+}
+
+extern "C" void RheniumEngineSetTabDesktop(int desktop) {
+  rhenium::SetActiveTabDesktop(desktop != 0);
+}
+
+extern "C" void RheniumEngineSetDarkMode(int dark, int force_dark) {
+  rhenium::SetDarkMode(dark != 0, force_dark != 0);
+}
+
 extern "C" void RheniumEnginePointer(int kind,
                                      unsigned int id,
                                      float x_dip,

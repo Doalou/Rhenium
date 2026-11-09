@@ -54,6 +54,7 @@
 #include <winrt/Windows.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
 #include <winrt/Windows.UI.Xaml.Input.h>
+#include <winrt/Windows.UI.Xaml.Interop.h>
 #include <winrt/Windows.UI.Xaml.Media.Animation.h>
 #include <winrt/Windows.UI.Xaml.Media.Imaging.h>
 #include <winrt/Windows.UI.Xaml.Media.h>
@@ -80,6 +81,12 @@ namespace {
 constexpr wchar_t kHomeUrlSetting[] = L"home_url";
 // « fr-FR » ou « en-US » ; absent : langue du téléphone.
 constexpr wchar_t kLanguageSetting[] = L"language";
+// Présent (vrai) : sites en version pour ordinateur.
+constexpr wchar_t kDesktopSitesSetting[] = L"desktop_sites";
+// « light » ou « dark » ; absent : thème du téléphone.
+constexpr wchar_t kThemeSetting[] = L"theme";
+// Présent (vrai) : pages claires assombries en thème sombre.
+constexpr wchar_t kForceDarkSetting[] = L"force_dark";
 
 // Moteurs de recherche proposés, le premier par défaut ; le texte cherché
 // s'ajoute au préfixe.
@@ -123,13 +130,30 @@ constexpr wchar_t kGlyphMore[] = L"\xE712";
 constexpr wchar_t kGlyphAdd[] = L"\xE710";
 constexpr wchar_t kGlyphFavorite[] = L"\xE734";
 constexpr wchar_t kGlyphFavoriteFill[] = L"\xE735";
+constexpr wchar_t kGlyphCheck[] = L"\xE73E";
 
-constexpr Color kBarColor{0xFF, 0x1F, 0x1F, 0x1F};
-constexpr Color kMenuColor{0xFF, 0x2B, 0x2B, 0x2B};
-constexpr Color kFieldColor{0xFF, 0x33, 0x33, 0x33};
-constexpr Color kFieldFocusedColor{0xFF, 0xF2, 0xF2, 0xF2};
-constexpr Color kTextColor{0xFF, 0xE6, 0xE6, 0xE6};
-constexpr Color kDimTextColor{0xFF, 0x99, 0x99, 0x99};
+// Teintes de la coquille. Leurs pinceaux sont partagés : un changement de
+// thème change leur couleur partout.
+enum Ink {
+  kBarColor,
+  kMenuColor,
+  kFieldColor,
+  kFieldFocusedColor,
+  kFieldFocusedTextColor,
+  kTextColor,
+  kDimTextColor,
+  kInkCount
+};
+constexpr Color kDarkInks[kInkCount] = {
+    {0xFF, 0x1F, 0x1F, 0x1F}, {0xFF, 0x2B, 0x2B, 0x2B},
+    {0xFF, 0x33, 0x33, 0x33}, {0xFF, 0xF2, 0xF2, 0xF2},
+    {0xFF, 0x1F, 0x1F, 0x1F}, {0xFF, 0xE6, 0xE6, 0xE6},
+    {0xFF, 0x99, 0x99, 0x99}};
+constexpr Color kLightInks[kInkCount] = {
+    {0xFF, 0xF2, 0xF2, 0xF2}, {0xFF, 0xE6, 0xE6, 0xE6},
+    {0xFF, 0xDE, 0xDE, 0xDE}, {0xFF, 0xFF, 0xFF, 0xFF},
+    {0xFF, 0x1A, 0x1A, 0x1A}, {0xFF, 0x1A, 0x1A, 0x1A},
+    {0xFF, 0x6B, 0x6B, 0x6B}};
 constexpr double kBarHeight = 48;
 
 struct HistoryEntry {
@@ -180,6 +204,7 @@ struct ShellState {
   TextBox home_url{nullptr};
   StackPanel extension_list{nullptr};
   Button add_extension{nullptr};  // menu, sur une page du Chrome Web Store
+  FontIcon desktop_check{nullptr};  // menu, onglet en version pour ordinateur
   bool installing = false;
   Grid tabs{nullptr};
   Grid tab_cards{nullptr};
@@ -202,6 +227,9 @@ struct ShellState {
   long long banner_time = 0;
   DispatcherTimer memory_timer{nullptr};
   CoreDispatcher dispatcher{nullptr};
+  std::vector<SolidColorBrush> inks;  // une par Ink
+  bool dark = true;
+  Windows::UI::ViewManagement::UISettings ui_settings{nullptr};
   RheniumHost host{};
   std::wstring url;
   std::wstring title;
@@ -271,6 +299,14 @@ SolidColorBrush Brush(Color color) {
   return SolidColorBrush(color);
 }
 
+SolidColorBrush Brush(Ink ink) {
+  return g_shell->inks[ink];
+}
+
+Color InkColor(Ink ink) {
+  return (g_shell->dark ? kDarkInks : kLightInks)[ink];
+}
+
 FontIcon Glyph(wchar_t const* glyph) {
   FontIcon icon;
   icon.FontFamily(FontFamily(L"Segoe MDL2 Assets"));
@@ -279,11 +315,11 @@ FontIcon Glyph(wchar_t const* glyph) {
   return icon;
 }
 
-TextBlock Label(wchar_t const* text, double size, Color color = kTextColor) {
+TextBlock Label(wchar_t const* text, double size, Ink ink = kTextColor) {
   TextBlock block;
   block.Text(text);
   block.FontSize(size);
-  block.Foreground(Brush(color));
+  block.Foreground(Brush(ink));
   block.TextWrapping(TextWrapping::Wrap);
   return block;
 }
@@ -328,6 +364,22 @@ void SetSearchEngine(int index) {
     values.Insert(kSearchEngineSetting, box_value(kSearchEngines[index].name));
   }
   RheniumEngineSetSearchUrl(kSearchEngines[index].prefix);
+}
+
+bool DesktopSitesWanted() {
+  auto values =
+      Windows::Storage::ApplicationData::Current().LocalSettings().Values();
+  return values.HasKey(kDesktopSitesSetting);
+}
+
+void SetDesktopSites(bool desktop) {
+  auto values =
+      Windows::Storage::ApplicationData::Current().LocalSettings().Values();
+  if (desktop)
+    values.Insert(kDesktopSitesSetting, box_value(true));
+  else if (values.HasKey(kDesktopSitesSetting))
+    values.Remove(kDesktopSitesSetting);
+  RheniumEngineSetDesktopSites(desktop ? 1 : 0);
 }
 
 // Hors saisie, la barre ne montre que le domaine, comme Edge.
@@ -596,6 +648,9 @@ void OpenMenu() {
       !shell.installing && RheniumEngineWebStoreId(shell.url.c_str(), id)
           ? Visibility::Visible
           : Visibility::Collapsed);
+  shell.desktop_check.Visibility(RheniumEngineIsTabDesktop()
+                                     ? Visibility::Visible
+                                     : Visibility::Collapsed);
   shell.dismiss_layer.Visibility(Visibility::Visible);
   shell.menu.Visibility(Visibility::Visible);
 
@@ -631,9 +686,64 @@ void StyleStatusBar() {
     return;
   }
   auto status_bar = Windows::UI::ViewManagement::StatusBar::GetForCurrentView();
-  status_bar.BackgroundColor(kBarColor);
+  status_bar.BackgroundColor(InkColor(kBarColor));
   status_bar.BackgroundOpacity(1);
-  status_bar.ForegroundColor(kTextColor);
+  status_bar.ForegroundColor(InkColor(kTextColor));
+}
+
+std::wstring ThemeSetting() {
+  auto values =
+      Windows::Storage::ApplicationData::Current().LocalSettings().Values();
+  return std::wstring(
+      unbox_value_or<hstring>(values.TryLookup(kThemeSetting), hstring()));
+}
+
+bool ForceDarkWanted() {
+  auto values =
+      Windows::Storage::ApplicationData::Current().LocalSettings().Values();
+  return values.HasKey(kForceDarkSetting);
+}
+
+bool PhoneIsDark() {
+  try {
+    return Windows::UI::ViewManagement::UISettings()
+               .GetColorValue(
+                   Windows::UI::ViewManagement::UIColorType::Background)
+               .R < 0x80;
+  } catch (...) {
+    return true;
+  }
+}
+
+ElementTheme ShellTheme() {
+  return g_shell->dark ? ElementTheme::Dark : ElementTheme::Light;
+}
+
+// Coquille et pages au thème réglé, ou à celui du téléphone. Les menus
+// surgissants et les boîtes de dialogue prennent le leur à leur ouverture.
+void ApplyTheme() {
+  ShellState& shell = *g_shell;
+  const std::wstring theme = ThemeSetting();
+  shell.dark = theme.empty() ? PhoneIsDark() : theme == L"dark";
+  for (int i = 0; i < kInkCount; ++i) {
+    const Color color = InkColor(static_cast<Ink>(i));
+    if (static_cast<int>(shell.inks.size()) <= i)
+      shell.inks.push_back(SolidColorBrush(color));
+    else
+      shell.inks[i].Color(color);
+  }
+  if (shell.root)
+    shell.root.RequestedTheme(ShellTheme());
+  try {
+    StyleStatusBar();
+  } catch (...) {
+  }
+  RheniumEngineSetDarkMode(shell.dark ? 1 : 0, ForceDarkWanted() ? 1 : 0);
+}
+
+void FollowPhoneTheme() {
+  if (ThemeSetting().empty() && PhoneIsDark() != g_shell->dark)
+    ApplyTheme();
 }
 
 // Rappels du moteur, sur le thread UI sauf attach_swap_chain. Aucune
@@ -843,6 +953,7 @@ void StartEngine() {
   shell.engine_started = true;
   LoadTabs();
   RheniumEngineSetSearchUrl(kSearchEngines[SearchEngineIndex()].prefix);
+  RheniumEngineSetDesktopSites(DesktopSitesWanted() ? 1 : 0);
   shell.host.context = &shell;
   shell.host.scale = shell.panel.CompositionScaleX();
   shell.host.start_url = shell.start_url.c_str();
@@ -895,15 +1006,15 @@ void ForwardPointer(int kind, PointerRoutedEventArgs const& args) {
 // de TextBox redéfinies localement).
 void StyleAddress(TextBox const& address) {
   auto resources = address.Resources();
-  auto set = [&](wchar_t const* key, Color color) {
-    resources.Insert(box_value(key), Brush(color));
+  auto set = [&](wchar_t const* key, Ink ink) {
+    resources.Insert(box_value(key), Brush(ink));
   };
   set(L"TextControlBackground", kFieldColor);
   set(L"TextControlBackgroundPointerOver", kFieldColor);
   set(L"TextControlBackgroundFocused", kFieldFocusedColor);
   set(L"TextControlForeground", kTextColor);
   set(L"TextControlForegroundPointerOver", kTextColor);
-  set(L"TextControlForegroundFocused", kBarColor);
+  set(L"TextControlForegroundFocused", kFieldFocusedTextColor);
   set(L"TextControlPlaceholderForeground", kDimTextColor);
   set(L"TextControlPlaceholderForegroundPointerOver", kDimTextColor);
   set(L"TextControlPlaceholderForegroundFocused", kDimTextColor);
@@ -971,11 +1082,14 @@ void ToggleFavorite();
 void NewTab();
 void RebuildExtensions();
 void SetLanguage(int index);
+void SetTheme(int index);
+void SetForceDark(bool force_dark);
 
 // Boîte de message ; une seule à la fois (XAML refuse d'en ouvrir deux).
 void ShowMessage(std::wstring const& title, std::wstring const& text) {
   try {
     ContentDialog dialog;
+    dialog.RequestedTheme(ShellTheme());
     dialog.Title(box_value(title));
     dialog.Content(box_value(text));
     dialog.CloseButtonText(L"OK");
@@ -1057,6 +1171,19 @@ Border BuildMenu() {
   items.Children().Append(MenuItem(Tr(L"Accueil", L"Home"), [] {
     RheniumEngineNavigate(HomeUrl().c_str());
   }));
+  wchar_t const* desktop_text =
+      Tr(L"Version pour ordinateur", L"Desktop site");
+  Button desktop = MenuItem(desktop_text, [] {
+    RheniumEngineSetTabDesktop(!RheniumEngineIsTabDesktop());
+  });
+  shell.desktop_check = Glyph(kGlyphCheck);
+  shell.desktop_check.HorizontalAlignment(HorizontalAlignment::Right);
+  Grid desktop_row;
+  desktop_row.Children().Append(Label(desktop_text, 15));
+  desktop_row.Children().Append(shell.desktop_check);
+  desktop.HorizontalContentAlignment(HorizontalAlignment::Stretch);
+  desktop.Content(desktop_row);
+  items.Children().Append(desktop);
   items.Children().Append(
       MenuItem(Tr(L"Paramètres", L"Settings"), OpenSettings));
 
@@ -1143,6 +1270,7 @@ void CollectExtension(void* entries,
 void ConfirmUninstall(ExtensionEntry const& entry) {
   try {
     ContentDialog dialog;
+    dialog.RequestedTheme(ShellTheme());
     dialog.Title(box_value(Tr(L"Supprimer l'extension", L"Remove extension")));
     dialog.Content(box_value(Tr(L"Supprimer « ", L"Remove “") + entry.name +
                              Tr(L" » ?", L"”?")));
@@ -1167,6 +1295,7 @@ void OnBrowsingDataCleared(void*) noexcept {
 void ConfirmClearData() {
   try {
     ContentDialog dialog;
+    dialog.RequestedTheme(ShellTheme());
     dialog.Title(box_value(Tr(L"Effacer les données", L"Clear data")));
     dialog.Content(box_value(
         Tr(L"Effacer les cookies, le cache et les données des sites ? Vous "
@@ -1274,6 +1403,55 @@ Grid BuildSettings() {
     SetSearchEngine(engines.SelectedIndex());
   });
   add(engines);
+
+  add(SectionTitle(Tr(L"Version des sites", L"Site version")));
+  ComboBox versions;
+  versions.HorizontalAlignment(HorizontalAlignment::Stretch);
+  versions.Items().Append(box_value(Tr(L"Mobile", L"Mobile")));
+  versions.Items().Append(box_value(Tr(L"Ordinateur", L"Desktop")));
+  versions.SelectedIndex(DesktopSitesWanted() ? 1 : 0);
+  versions.SelectionChanged([versions](auto&&, auto&&) {
+    SetDesktopSites(versions.SelectedIndex() == 1);
+  });
+  add(versions);
+  TextBlock per_tab =
+      Label(Tr(L"Un onglet peut changer de version par « … », « Version pour "
+               L"ordinateur ».",
+               L"A tab can switch with “…”, “Desktop site”."),
+            13, kDimTextColor);
+  per_tab.Margin(Thickness{0, 8, 0, 0});
+  add(per_tab);
+
+  add(SectionTitle(Tr(L"Thème", L"Theme")));
+  ComboBox themes;
+  themes.HorizontalAlignment(HorizontalAlignment::Stretch);
+  for (wchar_t const* name :
+       {Tr(L"Comme le téléphone", L"Phone setting"), Tr(L"Clair", L"Light"),
+        Tr(L"Sombre", L"Dark")}) {
+    themes.Items().Append(box_value(name));
+  }
+  const std::wstring theme = ThemeSetting();
+  themes.SelectedIndex(theme == L"light" ? 1 : theme == L"dark" ? 2 : 0);
+  themes.SelectionChanged([themes](auto&&, auto&&) {
+    SetTheme(themes.SelectedIndex());
+  });
+  add(themes);
+  ToggleSwitch force_dark;
+  force_dark.Header(box_value(
+      Tr(L"Assombrir aussi les pages claires", L"Darken light pages too")));
+  force_dark.OnContent(box_value(L""));
+  force_dark.OffContent(box_value(L""));
+  force_dark.IsOn(ForceDarkWanted());
+  force_dark.Margin(Thickness{0, 12, 0, 0});
+  force_dark.Toggled([](Windows::Foundation::IInspectable const& sender,
+                        auto&&) {
+    SetForceDark(sender.as<ToggleSwitch>().IsOn());
+  });
+  add(force_dark);
+  add(Label(Tr(L"En thème sombre seulement. Les couleurs de certaines pages "
+               L"peuvent en souffrir.",
+               L"Dark theme only. Some pages may look off."),
+            13, kDimTextColor));
 
   add(SectionTitle(Tr(L"Langue", L"Language")));
   ComboBox languages;
@@ -1631,6 +1809,10 @@ Button ListItem(std::wstring const& title,
   });
   auto show_menu = [held, build_menu](FrameworkElement const& target) {
     MenuFlyout menu = build_menu();
+    Style presenter(xaml_typename<MenuFlyoutPresenter>());
+    presenter.Setters().Append(Setter(FrameworkElement::RequestedThemeProperty(),
+                                      box_value(ShellTheme())));
+    menu.MenuFlyoutPresenterStyle(presenter);
     menu.Closed([held](auto&&, auto&&) { *held = false; });
     menu.ShowAt(target);
   };
@@ -1687,7 +1869,8 @@ void ShowMoreHistory() {
     const SYSTEMTIME day = LocalTime(entry.time);
     if (DayKey(day) != shell.history_day) {
       shell.history_day = DayKey(day);
-      TextBlock title = Label(DayLabel(day).c_str(), 13, AccentColor());
+      TextBlock title = Label(DayLabel(day).c_str(), 13);
+      title.Foreground(Brush(AccentColor()));
       title.Margin(Thickness{0, 16, 0, 4});
       children.Append(title);
     }
@@ -1783,6 +1966,7 @@ void RenameFavorite(std::wstring const& url) {
     name.Text(it->title);
     name.SelectAll();
     ContentDialog dialog;
+    dialog.RequestedTheme(ShellTheme());
     dialog.Title(box_value(Tr(L"Renommer le favori", L"Rename favorite")));
     dialog.Content(name);
     dialog.PrimaryButtonText(Tr(L"Renommer", L"Rename"));
@@ -2500,7 +2684,7 @@ UIElement BuildUi() {
 
   shell.root = Border();
   shell.root.Background(Brush(kBarColor));
-  shell.root.RequestedTheme(ElementTheme::Dark);
+  shell.root.RequestedTheme(ShellTheme());
   shell.root.Child(layout);
   return shell.root;
 }
@@ -2554,6 +2738,28 @@ void SetLanguage(int index) {
                                [] { ApplyLanguage(); });
 }
 
+void SetTheme(int index) {
+  auto values =
+      Windows::Storage::ApplicationData::Current().LocalSettings().Values();
+  if (index == 1)
+    values.Insert(kThemeSetting, box_value(L"light"));
+  else if (index == 2)
+    values.Insert(kThemeSetting, box_value(L"dark"));
+  else if (values.HasKey(kThemeSetting))
+    values.Remove(kThemeSetting);
+  ApplyTheme();
+}
+
+void SetForceDark(bool force_dark) {
+  auto values =
+      Windows::Storage::ApplicationData::Current().LocalSettings().Values();
+  if (force_dark)
+    values.Insert(kForceDarkSetting, box_value(true));
+  else if (values.HasKey(kForceDarkSetting))
+    values.Remove(kForceDarkSetting);
+  ApplyTheme();
+}
+
 // Bouton retour du téléphone : panneau, menu, puis le moteur (page
 // d'extension, précédent, onglet ouvert par un lien) ; sinon le système
 // ferme l'app.
@@ -2587,6 +2793,13 @@ void ShareCurrentPage(DataTransferManager const&,
 
 struct App : ApplicationT<App> {
   App() {
+    // Thème des menus surgissants, qui ne suivent que celui de l'app, fixé
+    // au lancement.
+    const std::wstring theme = ThemeSetting();
+    if (!theme.empty()) {
+      RequestedTheme(theme == L"dark" ? ApplicationTheme::Dark
+                                      : ApplicationTheme::Light);
+    }
     UnhandledException([](auto&&, UnhandledExceptionEventArgs const& args) {
       wchar_t code[16];
       swprintf_s(code, L"%08X", static_cast<unsigned>(args.Exception().value));
@@ -2607,6 +2820,12 @@ struct App : ApplicationT<App> {
       LoadHistory();
       LoadFavorites();
       LoadDownloads();
+      ApplyTheme();
+      g_shell->ui_settings = Windows::UI::ViewManagement::UISettings();
+      g_shell->ui_settings.ColorValuesChanged([](auto&&, auto&&) {
+        g_shell->dispatcher.RunAsync(CoreDispatcherPriority::Normal,
+                                     [] { FollowPhoneTheme(); });
+      });
       // Fenêtre sur tout l'écran, marges posées par FitVisibleBounds.
       auto view = ApplicationView::GetForCurrentView();
       view.SetDesiredBoundsMode(
@@ -2629,13 +2848,11 @@ struct App : ApplicationT<App> {
               return;
             if (!args.Visible())
               SaveSession();
+            else
+              FollowPhoneTheme();
             RheniumEngineSetVisible(args.Visible() ? 1 : 0);
           });
       DataTransferManager::GetForCurrentView().DataRequested(ShareCurrentPage);
-      try {
-        StyleStatusBar();
-      } catch (...) {
-      }
       Windows::UI::Core::SystemNavigationManager::GetForCurrentView()
           .BackRequested([](auto&&, auto const& args) {
             args.Handled(HandleBack());

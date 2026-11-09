@@ -5674,10 +5674,10 @@ index 0000000000..9b280c2dce
 +#endif  // EXTENSIONS_RHENIUM_RHENIUM_L10N_MESSAGE_FILTER_H_
 diff --git a/extensions/rhenium/rhenium_main_delegate.cc b/extensions/rhenium/rhenium_main_delegate.cc
 new file mode 100644
-index 0000000000..5e977a2fcb
+index 0000000000..4018dbbcbd
 --- /dev/null
 +++ b/extensions/rhenium/rhenium_main_delegate.cc
-@@ -0,0 +1,640 @@
+@@ -0,0 +1,647 @@
 +// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -5947,6 +5947,13 @@ index 0000000000..5e977a2fcb
 +      extensions::ProcessMap::Get(site_instance->GetBrowserContext())
 +          ->Insert(extension->id(), site_instance->GetProcess()->GetID());
 +    }
++  }
++
++  void OverrideWebkitPrefs(content::WebContents* web_contents,
++                           blink::web_pref::WebPreferences* prefs) override {
++    content::ShellContentBrowserClient::OverrideWebkitPrefs(web_contents,
++                                                           prefs);
++    rhenium::ApplyDarkMode(prefs);
 +  }
 +
 +  bool IsHandledURL(const GURL& url) override {
@@ -7387,10 +7394,10 @@ index 0000000000..1ce7d64619
 +#endif  // EXTENSIONS_RHENIUM_RHENIUM_SCRIPTING_API_H_
 diff --git a/extensions/rhenium/rhenium_tab_model.cc b/extensions/rhenium/rhenium_tab_model.cc
 new file mode 100644
-index 0000000000..be477da102
+index 0000000000..91e6bb221b
 --- /dev/null
 +++ b/extensions/rhenium/rhenium_tab_model.cc
-@@ -0,0 +1,612 @@
+@@ -0,0 +1,719 @@
 +// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -7422,13 +7429,16 @@ index 0000000000..be477da102
 +#include "content/public/browser/web_contents.h"
 +#include "content/public/browser/web_contents_observer.h"
 +#include "content/shell/browser/shell.h"
++#include "content/shell/browser/shell_content_browser_client.h"
 +#include "content/shell/browser/shell_uwp_host.h"
 +#include "extensions/browser/extension_registry.h"
 +#include "extensions/common/api/extension_action/action_info.h"
 +#include "extensions/common/extension.h"
 +#include "extensions/common/manifest_handlers/options_page_info.h"
 +#include "extensions/rhenium/rhenium_pdf.h"
++#include "net/base/registry_controlled_domains/registry_controlled_domain.h"
 +#include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
++#include "third_party/blink/public/common/web_preferences/web_preferences.h"
 +#include "third_party/skia/include/core/SkBitmap.h"
 +#include "ui/aura/window.h"
 +#include "ui/gfx/geometry/rect.h"
@@ -7451,6 +7461,7 @@ index 0000000000..be477da102
 +  // Page déchargée faute de mémoire, rechargée à l'activation.
 +  bool discarded = false;
 +  base::TimeTicks last_active;
++  bool desktop = false;  // version pour ordinateur
 +};
 +
 +// Qui crée le prochain Shell.
@@ -7467,6 +7478,9 @@ index 0000000000..be477da102
 +int g_discarded_id = 0;  // onglet dont le Shell est remplacé (kDiscard)
 +content::Shell* g_overlay = nullptr;
 +bool g_app_visible = true;
++bool g_desktop_sites = false;
++bool g_dark_pages = false;
++bool g_force_dark = false;
 +
 +Tab* FindTab(int id) {
 +  for (Tab& tab : Tabs()) {
@@ -7507,28 +7521,75 @@ index 0000000000..be477da102
 +           base::StartsWith(url.path_piece(), "/webstore")));
 +}
 +
-+std::string DesktopUserAgent() {
-+  return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-+         "(KHTML, like Gecko) Chrome/" +
-+         std::string(version_info::GetMajorVersionNumber()) +
-+         ".0.0.0 Safari/537.36";
++bool IsMobileHost(base::StringPiece host) {
++  for (base::StringPiece label : base::SplitStringPiece(
++           host, ".", base::KEEP_WHITESPACE, base::SPLIT_WANT_NONEMPTY)) {
++    if (label == "m" || label == "mobile")
++      return true;
++  }
++  return false;
 +}
 +
-+// Suit une page d'onglet pour l'historique, l'agent utilisateur du Web Store
-+// et sa destruction.
++// Page redirigée vers la version mobile du site (fr.wikipedia.org vers
++// fr.m.wikipedia.org) : en changeant de version, on recharge l'adresse
++// demandée au départ. Pas après une autre redirection, qui peut venir d'un
++// formulaire (consentement, connexion) qu'on ne peut pas redemander.
++bool RedirectedToMobile(content::NavigationEntry& entry) {
++  const GURL& original = entry.GetOriginalRequestURL();
++  const GURL& url = entry.GetURL();
++  return original.is_valid() && original.host_piece() != url.host_piece() &&
++         net::registry_controlled_domains::SameDomainOrHost(
++             original, url,
++             net::registry_controlled_domains::INCLUDE_PRIVATE_REGISTRIES) &&
++         IsMobileHost(url.host_piece()) && !IsMobileHost(original.host_piece());
++}
++
++// Agent utilisateur et indices (Sec-CH-UA-*) de Chrome pour Windows.
++blink::UserAgentOverride DesktopUserAgent() {
++  blink::UserAgentOverride ua;
++  ua.ua_string_override =
++      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
++      "(KHTML, like Gecko) Chrome/" +
++      std::string(version_info::GetMajorVersionNumber()) +
++      ".0.0.0 Safari/537.36";
++  blink::UserAgentMetadata metadata = content::GetShellUserAgentMetadata();
++  metadata.platform = "Windows";
++  metadata.platform_version = "10.0.0";
++  metadata.architecture = "x86";
++  metadata.bitness = "64";
++  metadata.model.clear();
++  metadata.mobile = false;
++  ua.ua_metadata_override = std::move(metadata);
++  return ua;
++}
++
++// Suit une page d'onglet pour l'historique, l'agent utilisateur (version pour
++// ordinateur, Web Store) et sa destruction.
 +class TabWatcher : public content::WebContentsObserver {
 + public:
 +  TabWatcher(content::WebContents* web_contents, int id)
 +      : content::WebContentsObserver(web_contents), id_(id) {
-+    web_contents->SetUserAgentOverride(
-+        blink::UserAgentOverride::UserAgentOnly(DesktopUserAgent()),
-+        /*override_in_new_tabs=*/false);
++    web_contents->SetUserAgentOverride(DesktopUserAgent(),
++                                       /*override_in_new_tabs=*/false);
 +  }
 +
 + private:
 +  void DidStartNavigation(content::NavigationHandle* handle) override {
-+    if (handle->IsInPrimaryMainFrame())
-+      handle->SetIsOverridingUserAgent(IsWebStore(handle->GetURL()));
++    ChooseUserAgent(handle);
++  }
++
++  // Une redirection peut mener au Web Store, par exemple depuis la page de
++  // consentement aux cookies de Google (consent.google.com/save).
++  void DidRedirectNavigation(content::NavigationHandle* handle) override {
++    ChooseUserAgent(handle);
++  }
++
++  void ChooseUserAgent(content::NavigationHandle* handle) {
++    if (!handle->IsInPrimaryMainFrame())
++      return;
++    const Tab* tab = FindTab(id_);
++    handle->SetIsOverridingUserAgent((tab && tab->desktop) ||
++                                     IsWebStore(handle->GetURL()));
 +  }
 +
 +  void DidFinishNavigation(content::NavigationHandle* handle) override {
@@ -7705,8 +7766,11 @@ index 0000000000..be477da102
 +  LOG(INFO) << "Rhenium : onglet " << id << " ouvert"
 +            << (opener_id ? " par un lien de l'onglet " : "")
 +            << (opener_id ? base::NumberToString(opener_id) : "");
++  const Tab* opener = FindTab(opener_id);
++  const bool desktop = opener ? opener->desktop : g_desktop_sites;
 +  Tabs().push_back({id, shell, opener_id});
 +  Tabs().back().last_active = base::TimeTicks::Now();
++  Tabs().back().desktop = desktop;
 +  new TabWatcher(shell->web_contents(), id);
 +  if (g_creator == Creator::kRestore)
 +    Hide(shell);
@@ -8002,13 +8066,63 @@ index 0000000000..be477da102
 +  return g_overlay != nullptr;
 +}
 +
++void SetDesktopSites(bool desktop) {
++  g_desktop_sites = desktop;
++  for (Tab& tab : Tabs())
++    tab.desktop = desktop;
++}
++
++bool IsActiveTabDesktop() {
++  const Tab* tab = ActiveTab();
++  return tab ? tab->desktop : g_desktop_sites;
++}
++
++void SetActiveTabDesktop(bool desktop) {
++  Tab* tab = ActiveTab();
++  if (!tab || tab->desktop == desktop)
++    return;
++  tab->desktop = desktop;
++  LOG(INFO) << "Rhenium : onglet " << tab->id << " en version "
++            << (desktop ? "ordinateur" : "mobile");
++  content::NavigationController& controller =
++      tab->shell->web_contents()->GetController();
++  content::NavigationEntry* entry = controller.GetLastCommittedEntry();
++  if (entry && !entry->IsInitialEntry()) {
++    controller.Reload(RedirectedToMobile(*entry)
++                          ? content::ReloadType::ORIGINAL_REQUEST_URL
++                          : content::ReloadType::NORMAL,
++                      /*check_for_repost=*/true);
++  }
++}
++
++void SetDarkMode(bool dark, bool force_dark) {
++  force_dark = dark && force_dark;
++  if (dark == g_dark_pages && force_dark == g_force_dark)
++    return;
++  g_dark_pages = dark;
++  g_force_dark = force_dark;
++  LOG(INFO) << "Rhenium : pages en thème " << (dark ? "sombre" : "clair")
++            << (force_dark ? ", assombries" : "");
++  for (Tab& tab : Tabs())
++    tab.shell->web_contents()->NotifyPreferencesChanged();
++  if (g_overlay)
++    g_overlay->web_contents()->NotifyPreferencesChanged();
++}
++
++void ApplyDarkMode(blink::web_pref::WebPreferences* prefs) {
++  prefs->preferred_color_scheme =
++      g_dark_pages ? blink::mojom::PreferredColorScheme::kDark
++                   : blink::mojom::PreferredColorScheme::kLight;
++  prefs->force_dark_mode_enabled = g_force_dark;
++}
++
 +}  // namespace rhenium
 diff --git a/extensions/rhenium/rhenium_tab_model.h b/extensions/rhenium/rhenium_tab_model.h
 new file mode 100644
-index 0000000000..3104e9759e
+index 0000000000..1d70ebd1f0
 --- /dev/null
 +++ b/extensions/rhenium/rhenium_tab_model.h
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,125 @@
 +// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -8021,6 +8135,10 @@ index 0000000000..3104e9759e
 +#include <string>
 +
 +class GURL;
++
++namespace blink::web_pref {
++struct WebPreferences;
++}  // namespace blink::web_pref
 +
 +namespace content {
 +class BrowserContext;
@@ -8111,6 +8229,21 @@ index 0000000000..3104e9759e
 +bool OpenOptionsPage();
 +void CloseOverlay();
 +bool IsOverlayOpen();
++
++// Version pour ordinateur : agent utilisateur de Chrome pour Windows au lieu
++// de celui de Chrome pour Android. Réglage de l'app, qui vaut pour les
++// onglets ouverts dès leur prochain chargement, puis choix par onglet, qui
++// recharge la page.
++void SetDesktopSites(bool desktop);
++bool IsActiveTabDesktop();
++void SetActiveTabDesktop(bool desktop);
++
++// Thème des pages (prefers-color-scheme), et pages claires assombries par
++// Blink en thème sombre si `force_dark`. Appliqué tout de suite aux onglets
++// ouverts.
++void SetDarkMode(bool dark, bool force_dark);
++// Pour ContentBrowserClient::OverrideWebkitPrefs.
++void ApplyDarkMode(blink::web_pref::WebPreferences* prefs);
 +
 +}  // namespace rhenium
 +

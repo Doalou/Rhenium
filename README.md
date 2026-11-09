@@ -1,77 +1,112 @@
 # Rhénium
 
-Un navigateur moderne pour Windows 10 Mobile, basé sur Chromium.
+Chromium sur Windows 10 Mobile.
 
-Le navigateur intégré à Windows 10 Mobile repose sur EdgeHTML, figé depuis 2017 : une part croissante du web s'y affiche mal ou pas du tout, et les navigateurs tiers du Store ne sont que des interfaces autour du même moteur. Rhénium porte Chromium (Blink et V8) sur les Lumia, pour redonner à ces téléphones un accès correct au web d'aujourd'hui. C'est un projet communautaire, destiné aux passionnés qui utilisent encore un Lumia et savent installer une app par sideload.
+Le navigateur de W10M repose sur EdgeHTML, qui n'a plus évolué depuis 2017, et les navigateurs du Store ne font qu'habiller le même moteur. Rhénium fait tourner Blink et V8 sur un Lumia, pour que ces téléphones affichent le web d'aujourd'hui.
 
-## Où en est le projet
+Le projet s'adresse à ceux qui utilisent encore un Lumia et savent installer une app hors du Store.
 
-Rhénium tourne sur un Lumia 950 : il affiche Wikipédia, YouTube et les sites courants dans leur version mobile, avec défilement et zoom tactiles, clavier virtuel et rotation. L'interface reprend celle d'Edge sur Windows 10 Mobile : l'adresse en bas de l'écran, un menu « … », plusieurs onglets avec leurs aperçus, les favoris, l'historique, les téléchargements et une liseuse PDF, en français ou en anglais US. Les cookies et les données des sites sont gardés d'un lancement à l'autre. uBlock Origin Lite y est installé et actif dès le premier lancement.
+## Ce qui marche
 
-| Jalon | Contenu | État |
-| --- | --- | --- |
-| J0 · Toolchain | Code C++ et Rust compilé pour ARM32 qui tourne sur le téléphone | Atteint |
-| J1 · Fondations | V8 avec JIT, `//base` de Chromium, 1 201 tests au vert sur le Lumia | Atteint |
-| J2 · Moteur | `content_shell` en un seul processus, rendu logiciel, réseau et TLS | Atteint |
-| J3 · Navigation tactile | Coquille XAML, toucher, saisie, rotation, cache disque, agent utilisateur mobile | Atteint |
-| J4 · Extensions | Extensions Manifest V3, uBlock Origin Lite installé par défaut | Atteint |
-| J5 · v1 | Onglets, historique, favoris, téléchargements, profil persistant, liseuse PDF | Atteint |
+Sur un Lumia 950 :
 
-La lecture vidéo marche aussi : YouTube avec le son, fluide en 360p comme en 720p (VP9 par libvpx, AAC par Media Foundation, mise à l'échelle par libyuv).
+- les sites courants, dans leur version mobile, avec défilement, zoom, clavier virtuel et rotation ;
+- plusieurs onglets, l'historique, les favoris et les téléchargements ;
+- les PDF, ouverts dans PDF.js ;
+- YouTube en 360p et 720p, avec le son ;
+- uBlock Origin Lite, actif dès le premier lancement, et l'ajout d'autres extensions depuis le Chrome Web Store ;
+- les cookies et les données des sites, gardés d'un lancement à l'autre ;
+- la version pour ordinateur des sites, pour tous les onglets ou un seul ;
+- un mode sombre pour l'interface et les pages ;
+- une interface en français ou en anglais.
 
-Appareils visés : Lumia 950 et 950 XL en priorité (Windows 10 Mobile 1709), Lumia 650 et 640 au mieux.
+L'interface reprend celle d'Edge sur W10M : l'adresse en bas et un menu « … ».
 
-## Partie technique
+Les 950 et 950 XL sont les appareils visés. Les 650 et 640 n'ont pas encore été essayés.
 
-Chromium n'a jamais pris en charge Windows ARM32 ni les apps UWP. Rhénium part de **Chromium 116.0.5845.228** et ajoute une cible `target_os="winuwp"`, `target_cpu="arm"`.
+Ce qui manque encore : le rendu par le GPU (tout est dessiné par le processeur) et Continuum. Il n'y a pas de sandbox : tout tourne dans un seul processus.
 
-- **Toolchain** : Chromium est compilé par clang-cl (sans exceptions C++, que LLVM ne gère pas en ARM32 Windows) avec la STL de MSVC 14.44 et le SDK 10.0.19041. La coquille XAML est en C++/WinRT, compilée par MSVC, et liée au moteur dans le même exécutable.
-- **Un seul processus** : une app UWP mobile ne peut pas lancer de processus enfants. Navigateur, rendu, réseau et audio tournent comme des threads du même processus, sans sandbox.
-- **JIT de V8** : W10M refuse la mémoire à la fois inscriptible et exécutable. V8 écrit son code dans des pages RW puis les passe en RX (W^X), grâce à la capability `codeGeneration`. Le JIT est environ 3 fois plus rapide que le mode sans JIT.
-- **Couche plateforme** : `user32` n'exporte aucune fonction de fenêtres sur W10M. La boucle de messages passe par le `CoreDispatcher`, les entrées par les pointeurs de la `CoreWindow`, la saisie par `CoreTextEditContext`.
-- **Rendu** : composition logicielle Skia, présentée dans une swap chain Direct3D 11 posée sur un `SwapChainPanel` XAML. Le rendu GPU par ANGLE reste à faire.
-- **Correctifs post-édition de liens** : `j2\fix_vcall_thunks.py` réécrit les relais d'appels virtuels que clang génère mal en ARM32.
+## Installer
 
-Les modifications de Chromium sont gardées sous forme de correctifs (`patches\` de chaque jalon), appliqués par les scripts de build sur un arbre Chromium vierge.
+Il faut le mode développeur sur le téléphone (Paramètres, Mise à jour et sécurité, Pour les développeurs) et le Portail d'appareil activé dans le même écran.
 
-## Organisation du dépôt
+1. Télécharger `RheniumShell_arm.appx` et `RheniumDev.cer` depuis la page Releases.
+2. Ouvrir dans un navigateur du PC l'adresse donnée par le Portail d'appareil.
+3. Dans Apps, choisir le paquet et le certificat, puis installer.
 
-| Dossier | Contenu |
-| --- | --- |
-| `sonde\` | App UWP de mesure sur le téléphone (mémoire, JIT, Direct3D, A32, clang-cl, Rust, V8) et script de déploiement par USB. Voir `sonde\README.md` |
-| `j1\` | V8 11.6 pour Windows ARM32 : correctifs, cale et remplacements d'imports pour W10M. Voir `j1\README.md` |
-| `j1-base\` | Chromium `//base` pour W10M, boucle UI sur le `CoreDispatcher`. Voir `j1-base\README.md` |
-| `j2\` | Moteur (`content_shell`), coquille XAML, empaquetage de l'app. Voir `j2\README.md` |
-| `j3\` | Notes du jalon de navigation tactile. Voir `j3\README.md` |
-| `j4\` | Extensions et uBlock Origin Lite (récupération, licence, notes). Voir `j4\README.md` |
-| `j5\` | Jalon v1 : notes (profil, favoris, téléchargements, liseuse PDF) et `fetch-pdfjs.ps1`, qui prépare PDF.js. Voir `j5\README.md` |
+Toucher le `.appx` dans l'Explorateur de fichiers du téléphone installe l'app, mais elle plante au lancement.
 
-Non versionnés, recréés par les scripts : `chromium\` (`j1-base\fetch.ps1`, `j2\fetch.ps1`), `toolchains\` (jonction vers LLVM, gn et ninja), les dossiers `out\` (dont uBO Lite, `j4\out\ubol`), `sonde\certs\` et `v8\` (`j1\fetch.ps1`, V8 autonome des essais de J1, inutile à l'app).
+Une nouvelle version s'installe par-dessus l'ancienne sans effacer les données.
 
-## Compiler et installer
+## Compiler
 
-Il faut une machine Windows avec Visual Studio 2022 (MSVC 14.44 et outils ARM32, ATL ARM32 du toolset 14.30), le SDK Windows 10.0.19041, LLVM, Python 3 et PowerShell 7, et un téléphone en mode développeur.
+Ce n'est pas un petit build : il faut environ 40 Go de disque et plusieurs heures pour la première compilation.
 
-Première installation, une fois :
+Outils :
+
+- Windows et PowerShell 7 ;
+- Visual Studio 2022 avec le toolset MSVC **14.44** et ses outils ARM32. Les toolsets suivants ne savent plus compiler pour ARM32 : il faut garder une installation du 14.44 qu'on ne met plus à jour. ATL ARM32 vient du toolset 14.30. Les scripts trouvent eux-mêmes ces toolsets avec vswhere ;
+- le SDK Windows 10.0.19041 ;
+- LLVM 23 (testé avec clang-cl 23.1.3), installé dans `C:\Program Files\LLVM` ;
+- Python 3.
+
+Le dépôt doit être dans un chemin sans accent ni espace, par exemple `F:\Rhenium`.
+
+Récupérer les sources, une seule fois :
 
 ```powershell
-.\j1-base\fetch.ps1       # arbre Chromium 116 (dépôt git local de référence), gn et ninja (CIPD) dans toolchains\
-.\j2\fetch.ps1            # reste des sources et dépôts du DEPS
-.\j4\fetch-ubol.ps1       # uBlock Origin Lite, empreinte vérifiée
+.\j1-base\fetch.ps1     # Chromium 116.0.5845.228, gn et ninja
+.\j2\fetch.ps1          # dépendances du DEPS
+.\j4\fetch-ubol.ps1     # uBlock Origin Lite
+.\j5\fetch-pdfjs.ps1    # PDF.js
 ```
 
-Puis, à chaque changement :
+Compiler, empaqueter et installer sur un téléphone branché en USB :
 
 ```powershell
-.\j2\build-content.ps1 -KeepGoing   # applique les correctifs, gn gen, ninja
-.\j2\package-shell.ps1              # paquet j2\out\RheniumShell_arm.appx
+.\j2\build-content.ps1 -KeepGoing
+.\j2\package-shell.ps1
 .\sonde\deploy.ps1 -Ip 127.0.0.1 -Appx .\j2\out\RheniumShell_arm.appx
 ```
 
-`build-content.ps1` applique à l'arbre Chromium `j1-base\patches` (build, `//base`), `j2\patches` (le reste) et le correctif V8 de J1 (`j1\patches\0002`, dans `v8\`), chacun à un seul endroit ; les commandes pour les régénérer sont dans `j4\README.md`. Le paquet est signé par le certificat de développement `sonde\certs\RheniumDev.pfx`, créé au premier empaquetage par `sonde\dev-cert.ps1` et recréé à son expiration (il vaut trois ans).
+`build-content.ps1` applique les correctifs à l'arbre Chromium, lance gn puis ninja. Le paquet est signé par un certificat de développement créé au premier empaquetage dans `sonde\certs`.
 
-Le chemin du projet ne doit pas contenir d'accent (`F:\Rhenium`) : GN et ninja de 2023 échouent sinon.
+## Comment c'est fait
 
-## Assistance par IA
+Chromium n'a jamais tourné ni sur Windows ARM32 ni en app UWP. Rhénium part de Chromium 116.0.5845.228 et ajoute une cible `target_os="winuwp"`, `target_cpu="arm"`.
 
-Par souci de transparence : ce projet est développé avec l'assistance d'une IA (Claude, d'Anthropic), pour le code, les correctifs, les scripts et la documentation. Sur un projet de cette ampleur, porter Chromium sur une plateforme abandonnée et jamais prise en charge, tout faire à la main serait très difficile. Chaque étape est vérifiée sur un vrai téléphone.
+- Chromium est compilé par clang-cl, sans exceptions C++ (LLVM ne les gère pas sur ARM32 Windows). L'interface est en C++/WinRT, compilée par MSVC, dans le même exécutable.
+- Une app UWP sur mobile ne peut pas lancer d'autres processus : navigateur, rendu, réseau et audio sont des threads d'un seul processus.
+- W10M refuse la mémoire inscriptible et exécutable à la fois. V8 écrit son code dans des pages en lecture-écriture, puis les passe en exécution. Le JIT est environ trois fois plus rapide que l'interpréteur seul.
+- `user32` n'a pas de fenêtres sur W10M. La boucle de messages passe par le `CoreDispatcher`, le toucher par la `CoreWindow`, la saisie par `CoreTextEditContext`.
+- L'image est composée par Skia sur le processeur, puis affichée dans une swap chain Direct3D 11.
+
+Les modifications de Chromium sont gardées sous forme de correctifs, appliqués par les scripts sur un arbre vierge. Chaque dossier de jalon a sa note détaillée :
+
+| Dossier | Contenu |
+| --- | --- |
+| `sonde\` | App de mesure sur le téléphone et script de déploiement |
+| `j1\` | V8 pour Windows ARM32 |
+| `j1-base\` | `//base` de Chromium pour W10M, environnement de la toolchain |
+| `j2\` | Moteur (`content_shell`), interface, empaquetage |
+| `j3\` | Toucher, saisie, vidéo |
+| `j4\` | Extensions et uBlock Origin Lite |
+| `j5\` | Profil, favoris, téléchargements, PDF, version pour ordinateur, mode sombre |
+| `perf\` | Bancs de performance |
+
+| Jalon | État |
+| --- | --- |
+| J0, toolchain ARM32 | Atteint |
+| J1, V8 et `//base` | Atteint |
+| J2, moteur | Atteint |
+| J3, navigation tactile | Atteint |
+| J4, extensions | Atteint |
+| J5, v1 | Atteint (Continuum non traité) |
+
+## Licence
+
+Le code de Rhénium est sous licence BSD à trois clauses (voir `LICENSE`), comme Chromium. Chromium garde ses propres licences. uBlock Origin Lite (GPLv3) et PDF.js (Apache 2.0) sont livrés comme composants séparés, avec leurs licences et leurs sources (`j4\ubol\SOURCES.txt`, `j5\pdfjs\SOURCES.txt`).
+
+## Développé avec une IA
+
+Ce projet est développé avec l'aide de Claude, d'Anthropic, pour le code, les correctifs, les scripts et la documentation. Chaque étape est vérifiée sur un vrai téléphone.

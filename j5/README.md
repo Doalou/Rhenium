@@ -50,7 +50,22 @@ Déjà faits pendant J4 (voir `..\j4\README.md`) : onglets (8 au plus, avec aper
 - La coquille suit `MemoryManager` : au niveau `High` ou au-dessus, ou à plus de 90 % de la limite (y compris quand elle baisse, à la mise en arrière-plan), `RheniumEngineDiscardTab` vide les caches du moteur (`MemoryPressureListener`, niveau critique) et décharge l'onglet inactif utilisé le moins récemment ; un autre toutes les 2 s tant que la mémoire reste haute.
 - Déchargement (`rhenium::DiscardTab`) : un Shell vide remplace celui de l'onglet et reprend son historique (`NavigationController::CopyStateFrom`), puis l'ancien est fermé. À l'activation, la page se recharge (`SetNeedsReload`, `LoadIfNecessary`) ; précédent et suivant restent possibles, l'aperçu reste dans la liste des onglets.
 
+**Version pour ordinateur (2026-11-01)** : validée sur le Lumia en 0.4.26305.1175.
+
+- Paramètres, « Version des sites » : Mobile (Chrome pour Android, par défaut) ou Ordinateur (Chrome pour Windows). Réglage `desktop_sites` de l'app, qui vaut pour les onglets ouverts dès leur prochain chargement (`RheniumEngineSetDesktopSites`).
+- « … », « Version pour ordinateur » : bascule l'onglet actif et recharge sa page à son adresse d'origine (`ReloadType::ORIGINAL_REQUEST_URL`), coche quand elle est active. Un onglet ouvert par un lien prend la version de celui du lien.
+- `rhenium_tab_model.cc` : chaque onglet porte son choix, appliqué à chaque navigation du cadre principal (`SetIsOverridingUserAgent`), comme pour le Chrome Web Store. Les indices (`Sec-CH-UA-Platform`, `Sec-CH-UA-Mobile`) suivent l'agent utilisateur : certains sites, dont Google, s'y fient plus qu'à lui.
+
+**Mode sombre (2026-11-01)** : validé sur le Lumia en 0.4.26305.1223.
+
+- Paramètres, « Thème » : Comme le téléphone (par défaut), Clair ou Sombre (réglage `theme`). La coquille suit le thème du téléphone quand il change, ou au retour au premier plan (`UISettings.ColorValuesChanged`).
+- Pages : `prefers-color-scheme` vaut `dark` ou `light` (`RheniumContentBrowserClient::OverrideWebkitPrefs`, `rhenium::ApplyDarkMode`) ; un changement s'applique tout de suite aux onglets ouverts et à la page d'extension (`NotifyPreferencesChanged`), sans rechargement.
+- « Assombrir aussi les pages claires » (réglage `force_dark`), en thème sombre seulement : assombrissement automatique de Blink (`force_dark_mode_enabled`).
+- Coquille : couleurs en deux palettes (`kDarkInks`, `kLightInks`) et pinceaux partagés, recolorés sans reconstruire l'interface ; `RequestedTheme` de la racine, barre d'état du téléphone.
+
 ## Pièges
+
+- Les menus surgissants (`MenuFlyout`) et les boîtes de dialogue ne suivent pas le `RequestedTheme` de la racine, seulement celui de l'app, qui ne se règle qu'au lancement. Les boîtes reçoivent le thème de la coquille à leur ouverture, les menus d'appui long par le style de leur `MenuFlyoutPresenter` ; les listes déroulantes des Paramètres gardent celui du lancement.
 
 - Appui long sur un bouton XAML au toucher : `RightTapped` arrive au relâchement, avec le `Click` du bouton, qui ouvrait la page en plus du menu. Le menu s'ouvre au début de l'appui (`Holding`, état `Started`) et le `Click` qui suit est ignoré ; `RightTapped` ne sert plus qu'à la souris (`ListItem`, pour les favoris, l'historique et les téléchargements).
 - Tous les téléchargements échouaient à la fin : `BaseFile::MoveFileAndAdjustPermissions` renomme le `.crdownload` par `IFileOperation` (shell32), absent pour les apps UWP. Sous `WINUWP`, `base::Move` le remplace (`base_file_win.cc`) ; la raison d'une interruption est maintenant écrite dans le journal.
@@ -64,3 +79,5 @@ Déjà faits pendant J4 (voir `..\j4\README.md`) : onglets (8 au plus, avec aper
 | Vidéo en plein écran | `EnterFullscreenModeForTab` dans la coquille (barre masquée, paysage) ; vérifier le coût de la mise à l'échelle vers 1920x1080 |
 | Démarrage d'une vidéo | Lent sur YouTube : à mesurer (chargement de la page, du lecteur, premier tampon) |
 | Qualité vidéo par défaut | YouTube choisit le 360p dans la page ; le 720p tient, à proposer plus tôt si possible |
+| Continuum | Non traité (prévu au cahier des charges en v1, sans garantie) : fenêtre sur le second écran, taille, clavier et souris |
+| Thème des listes déroulantes | Suivre un changement de thème sans relancer l'app |
