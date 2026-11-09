@@ -23,6 +23,7 @@ param(
   [switch] $WithRust,
   [switch] $WithA32,
   [switch] $WithV8,
+  [switch] $V8Next,  # avec -WithV8 : V8 15.6 de F:\Rhenium\chromium-next\v8 (montée de Chromium)
   [int] $V8First = 0,  # avec -WithV8 : configuration V8 (base 0) du premier lancement après installation
   [switch] $WithBase,
   [switch] $BaseTests,  # avec -WithBase implicite : sous-ensemble de base_unittests au lieu du test de fumée
@@ -133,7 +134,7 @@ $codegen = if ($NoCodeGeneration) { 0 } else { 1 }
 $clangDefine = "/DSONDE_CLANG=$([int]($Compiler -eq 'clang'))"
 if ($WithA32 -and $Arch -ne 'arm') { throw '-WithA32 ne concerne que -Arch arm.' }
 $a32Flags = @(if ($WithA32) { '/DSONDE_A32=1', "/I$root\..\j1\app" } else { '/DSONDE_A32=0' })
-$a32Flags += "/DSONDE_V8=$([int][bool]$WithV8)", "/DSONDE_V8_FIRST=$V8First", "/DSONDE_BASE=$([int][bool]$WithBase)", "/DSONDE_BASE_TESTS=$([int][bool]$BaseTests)"
+$a32Flags += "/DSONDE_V8=$([int][bool]$WithV8)", "/DSONDE_V8_NEXT=$([int][bool]$V8Next)","/DSONDE_V8_FIRST=$V8First", "/DSONDE_BASE=$([int][bool]$WithBase)", "/DSONDE_BASE_TESTS=$([int][bool]$BaseTests)"
 
 # Liste des imports d'un autre exe, vérifiés un par un par la sonde : une DLL ou un export
 # absent du téléphone empêche cet exe de démarrer, sans aucun message. Les imports en
@@ -184,7 +185,7 @@ if ($Compiler -eq 'clang') {
 # avec les mêmes macros V8_*/CPPGC_* que v8_monolith.lib, lues dans ses fichiers ninja.
 $v8Libs = @()
 if ($WithV8) {
-  $v8 = (Resolve-Path "$root\..\v8").Path
+  $v8 = (Resolve-Path $(if ($V8Next) { 'F:\Rhenium\chromium-next\v8' } else { "$root\..\v8" })).Path
   $v8Out = "$v8\out\arm.release"
   $v8Lib = "$v8Out\obj\v8_monolith.lib"
   if (-not (Test-Path $v8Lib)) { throw "V8 n'est pas compilé : lancer ..\j1\build-v8.ps1 ($v8Lib absent)." }

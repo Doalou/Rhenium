@@ -719,6 +719,10 @@ extern "C" void (*rhenium_debug_sink)(char const* text);  // ..\j1\app\w10m_impo
 // Attentes d'un thread sur une page de code en cours d'écriture (W^X multi-thread) :
 // ..\v8\src\base\platform\platform-win32.cc, WaitForCodePage.
 extern "C" void rhenium_wx_stats(uint32_t* waits, double* total_ms, double* max_ms);
+#if SONDE_V8_NEXT
+// V8 15 : pages de code ouvertes en RW sur faute dans une portée d'écriture.
+extern "C" void rhenium_wx_write_stats(uint32_t* faults, uint32_t* unscoped, uintptr_t* last_unscoped_pc);
+#endif
 
 // Journal des étapes de V8 dans Téléchargements, écrit de façon synchrone : complet au moment
 // d'un plantage, contrairement au rapport. Appelé depuis des threads non STA (.get() permis).
@@ -851,8 +855,17 @@ DWORD WINAPI V8Thread(void* arg) {
     uint32_t waits = 0;
     double total = 0, max = 0;
     rhenium_wx_stats(&waits, &total, &max);
-    wchar_t text[128];
+    wchar_t text[256];
     swprintf_s(text, L"%u, cumul %.3f ms, plus longue %.3f ms", waits, total, max);
+#if SONDE_V8_NEXT
+    uint32_t faults = 0, unscoped = 0;
+    uintptr_t pc = 0;
+    rhenium_wx_write_stats(&faults, &unscoped, &pc);
+    wchar_t more[128];
+    swprintf_s(more, L" ; pages ouvertes en écriture %u, hors portée %u (pc 0x%08X)", faults, unscoped,
+               static_cast<unsigned>(pc));
+    wcscat_s(text, more);
+#endif
     job->wx = text;
     V8Log(std::wstring(L"attentes W^X : ") + text);
   }
@@ -880,7 +893,12 @@ void StartV8(TextBlock const& results) {
   };
   // --write-protect-code-memory : sans lui, V8 écrit le code dans des pages RW et ne les
   // repasse jamais en RX (il compte sur des pages RWX, refusées par W10M).
+#if SONDE_V8_NEXT
+  // V8 15 : W^X toujours actif sur W10M (RwxMemoryWriteScope, platform-win32.cc).
+#define RHENIUM_WX "--expose-gc "
+#else
 #define RHENIUM_WX "--no-write-code-using-rwx --write-protect-code-memory --expose-gc "
+#endif
   static Config const configs[] = {
       {L"JIT complet multi-thread", RHENIUM_WX "--sparkplug --maglev --turbofan"},
       {L"JIT complet mono-thread", RHENIUM_WX "--single-threaded --sparkplug --maglev --turbofan"},

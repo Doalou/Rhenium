@@ -1,0 +1,913 @@
+diff --git a/BUILD.gn b/BUILD.gn
+index 1df3d4e31b..c77f395007 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -3074,7 +3074,8 @@ template("run_mksnapshot") {
+       # target toolchains.  The same host binary is used to generate both, so
+       # mksnapshot needs to know which target OS to use at runtime.  It's weird,
+       # but the target OS is really |current_os|.
+-      "--target_os=$current_os",
++      # Rhénium : mksnapshot ne connaît que win pour Windows.
++      "--target_os=" + string_replace(current_os, "winuwp", "win"),
+       "--target_arch=$current_cpu",
+ 
+       "--embedded_src",
+diff --git a/include/v8-template.h b/include/v8-template.h
+index 182293f05b..51e5f75623 100644
+--- a/include/v8-template.h
++++ b/include/v8-template.h
+@@ -16,6 +16,12 @@
+ #include "v8-object.h"             // NOLINT(build/include_directory)
+ #include "v8config.h"              // NOLINT(build/include_directory)
+ 
++#if defined(_MSVC_STL_VERSION)
++// Rhénium : en C++23, std::span de la STL MSVC exige un type complet dès sa
++// déclaration (const_iterator).
++#include "v8-fast-api-calls.h"  // NOLINT(build/include_directory)
++#endif
++
+ namespace v8 {
+ 
+ class CFunction;
+diff --git a/src/base/cpu/cpu-arm.cc b/src/base/cpu/cpu-arm.cc
+index 2b6a9c8ab0..18fd0de594 100644
+--- a/src/base/cpu/cpu-arm.cc
++++ b/src/base/cpu/cpu-arm.cc
+@@ -323,6 +323,21 @@ void CPU::DetectFeatures() {
+   }
+   has_idiva_ = (cpu_flags & ARM_CPU_FLAG_IDIV) != 0;
+ 
++#elif V8_OS_WIN
++
++  // Rhénium : Windows ARM32 exige ARMv7 avec VFPv3 et Thumb-2.
++  architecture_ =
++      IsProcessorFeaturePresent(PF_ARM_V8_INSTRUCTIONS_AVAILABLE) ? 8 : 7;
++  has_thumb2_ = true;
++  has_fpu_ = true;
++  has_vfp_ = true;
++  has_vfp3_ = true;
++  has_vfp3_d32_ =
++      IsProcessorFeaturePresent(PF_ARM_VFP_32_REGISTERS_AVAILABLE) != 0;
++  has_neon_ = IsProcessorFeaturePresent(PF_ARM_NEON_INSTRUCTIONS_AVAILABLE) != 0;
++  has_idiva_ =
++      IsProcessorFeaturePresent(PF_ARM_DIVIDE_INSTRUCTION_AVAILABLE) != 0;
++
+ #endif  // V8_OS_LINUX
+ #elif V8_HOST_ARCH_ARM64
+ #ifdef V8_OS_WIN
+diff --git a/src/base/debug/stack_trace_win.cc b/src/base/debug/stack_trace_win.cc
+index 7b3b430668..612301e614 100644
+--- a/src/base/debug/stack_trace_win.cc
++++ b/src/base/debug/stack_trace_win.cc
+@@ -213,6 +213,12 @@ void StackTrace::InitTrace(const CONTEXT* context_record) {
+ #else
+ #error Unsupported Arch
+ #endif
++#elif defined(_M_ARM)
++  // Rhénium : Windows ARM32 (Thumb-2), R11 sert de pointeur de cadre.
++  int machine_type = IMAGE_FILE_MACHINE_ARMNT;
++  stack_frame.AddrPC.Offset = context_record->Pc;
++  stack_frame.AddrFrame.Offset = context_record->R11;
++  stack_frame.AddrStack.Offset = context_record->Sp;
+ #else
+   int machine_type = IMAGE_FILE_MACHINE_I386;
+   stack_frame.AddrPC.Offset = context_record->Eip;
+diff --git a/src/base/functional/bind-internal.h b/src/base/functional/bind-internal.h
+index 160664af5d..dea2dd91ac 100644
+--- a/src/base/functional/bind-internal.h
++++ b/src/base/functional/bind-internal.h
+@@ -106,11 +106,13 @@ template <typename Callable,
+           typename Signature = decltype(&Callable::operator())>
+ struct ExtractCallableRunTypeImpl;
+ 
+-#define BIND_INTERNAL_EXTRACT_CALLABLE_RUN_TYPE_WITH_QUALS(quals)     \
+-  template <typename Callable, typename R, typename... Args>          \
+-  struct ExtractCallableRunTypeImpl<Callable,                         \
+-                                    R (Callable::*)(Args...) quals> { \
+-    using Type = R(Args...);                                          \
++// Rhénium : `Owner` plutôt que `Callable`, car l'operator() de std::function
++// de la STL MSVC est hérité d'une classe de base.
++#define BIND_INTERNAL_EXTRACT_CALLABLE_RUN_TYPE_WITH_QUALS(quals)          \
++  template <typename Callable, typename Owner, typename R, typename... Args> \
++  struct ExtractCallableRunTypeImpl<Callable,                              \
++                                    R (Owner::*)(Args...) quals> {         \
++    using Type = R(Args...);                                               \
+   }
+ 
+ BIND_INTERNAL_EXTRACT_CALLABLE_RUN_TYPE_WITH_QUALS();
+diff --git a/src/base/immediate-crash.h b/src/base/immediate-crash.h
+index 9c25a7dce9..2192ecfe62 100644
+--- a/src/base/immediate-crash.h
++++ b/src/base/immediate-crash.h
+@@ -115,6 +115,13 @@
+ #define TRAP_SEQUENCE1_() __debugbreak()
+ #define TRAP_SEQUENCE2_()
+ 
++#elif V8_HOST_ARCH_ARM
++
++// Rhénium : Windows ARM32 (Thumb-2). __debugbreak() émet le point d'arrêt
++// Windows ; udf termine le processus s'il est ignoré.
++#define TRAP_SEQUENCE1_() __debugbreak()
++#define TRAP_SEQUENCE2_() asm volatile("udf #0")
++
+ #elif V8_HOST_ARCH_ARM64
+ 
+ // Windows ARM64 uses "BRK #F000" as its breakpoint instruction, and
+diff --git a/src/base/platform/platform-win32.cc b/src/base/platform/platform-win32.cc
+index ca1990b019..e3084b8cc5 100644
+--- a/src/base/platform/platform-win32.cc
++++ b/src/base/platform/platform-win32.cc
+@@ -28,6 +28,7 @@
+ #include <psapi.h>              // For GetProcessMemoryInfo().
+ #include <tlhelp32.h>           // For Module32First and al.
+ 
++#include <atomic>  // Rhénium : pages de code (WaitForCodePage)
+ #include <limits>
+ #include <optional>
+ 
+@@ -753,6 +754,10 @@ static LazyMutex rng_mutex = LAZY_MUTEX_INITIALIZER;
+ namespace {
+ 
+ bool UserShadowStackEnabled() {
++#if V8_HOST_ARCH_ARM
++  // Rhénium : pas de CET sur ARM32, et le SDK 19041 ne déclare pas cette API.
++  return false;
++#else
+   auto is_user_cet_available_in_environment =
+       reinterpret_cast<decltype(&IsUserCetAvailableInEnvironment)>(
+           ::GetProcAddress(::GetModuleHandleW(L"kernel32.dll"),
+@@ -778,6 +783,7 @@ bool UserShadowStackEnabled() {
+   }
+ 
+   return uss_policy.EnableUserShadowStack;
++#endif  // V8_HOST_ARCH_ARM
+ }
+ 
+ }  // namespace
+@@ -921,6 +927,236 @@ DWORD GetFileViewAccessFromMemoryPermission(OS::MemoryPermission access) {
+   UNREACHABLE();
+ }
+ 
++#if V8_HOST_ARCH_ARM
++}  // namespace
++
++// Rhénium : Windows ARM32 utilise toujours l'AAPCS à flottants matériels.
++// static
++bool OS::ArmUsingHardFloat() { return true; }
++
++namespace {
++
++// Rhénium : Windows 10 Mobile (UWP, ARM32). Une app ne crée de mémoire
++// exécutable que par VirtualAllocFromApp/VirtualProtectFromApp (capability
++// codeGeneration), qui refusent toute protection écriture+exécution, et
++// VirtualAllocFromApp refuse même l'exécution seule. On alloue donc sans
++// exécution puis on bascule la protection.
++//
++// W^X : V8 15 demande ses pages de code en RWX et encadre chaque écriture
++// dans le code par une RwxMemoryWriteScope, comme sur les Mac M1 où la bascule
++// est par thread. Ici, une demande RWX donne une page RX ; dans une portée, une
++// écriture dans une page de code RX la fait passer en RW (HandleJitWriteFault),
++// et la sortie de la portée la plus externe remet en RX les pages que ce thread
++// a ouvertes, quand plus aucun autre ne les tient (ExitJitWriteScope). Un
++// thread qui exécute une page en RW attend son retour en RX (WaitForCodePage).
++constexpr DWORD kExecuteProtections = PAGE_EXECUTE | PAGE_EXECUTE_READ |
++                                      PAGE_EXECUTE_READWRITE |
++                                      PAGE_EXECUTE_WRITECOPY;
++
++// Un bit par page de 4 Ko de l'espace d'adressage 32 bits (128 Ko de .bss,
++// engagés à la demande) : vrai si V8 a rendu la page exécutable.
++constexpr uintptr_t kCodePageShift = 12;
++constexpr size_t kCodePageSize = size_t{1} << kCodePageShift;
++std::atomic<uint32_t> code_pages[(uint64_t{1} << (32 - kCodePageShift)) / 32];
++
++bool IsCodePage(uintptr_t address) {
++  uintptr_t page = address >> kCodePageShift;
++  return code_pages[page / 32].load(std::memory_order_relaxed) &
++         (uint32_t{1} << (page % 32));
++}
++
++void MarkCodePages(void* address, size_t size, bool code) {
++  if (size == 0) return;
++  uintptr_t first = reinterpret_cast<uintptr_t>(address) >> kCodePageShift;
++  uintptr_t last =
++      (reinterpret_cast<uintptr_t>(address) + size - 1) >> kCodePageShift;
++  for (uintptr_t page = first; page <= last; ++page) {
++    uint32_t bit = uint32_t{1} << (page % 32);
++    if (code) {
++      code_pages[page / 32].fetch_or(bit, std::memory_order_relaxed);
++    } else {
++      code_pages[page / 32].fetch_and(~bit, std::memory_order_relaxed);
++    }
++  }
++}
++
++// Pages de code ouvertes en écriture par le thread courant.
++struct JitWritePages {
++  int depth = 0;
++  uint32_t count = 0;
++  uint32_t capacity = 0;
++  uint32_t* pages = nullptr;  // VirtualAllocFromApp, gardé pour le thread
++};
++thread_local JitWritePages jit_write_pages;
++
++// Nombre de threads qui tiennent chaque page en RW (1 Mo de .bss, à la demande).
++uint8_t page_writers[uint64_t{1} << (32 - kCodePageShift)];
++SRWLOCK page_writers_lock = SRWLOCK_INIT;
++
++// Statistiques, lues par rhenium_wx_stats() et rhenium_wx_write_stats().
++std::atomic<uint32_t> wx_waits{0};
++std::atomic<uint64_t> wx_wait_ticks{0};
++std::atomic<uint64_t> wx_wait_max_ticks{0};
++std::atomic<uint32_t> wx_write_faults{0};
++std::atomic<uint32_t> wx_unscoped_writes{0};
++std::atomic<uintptr_t> wx_last_unscoped_pc{0};
++
++bool PushJitWritePage(JitWritePages& t, uint32_t page) {
++  if (t.count == t.capacity) {
++    uint32_t capacity = t.capacity ? t.capacity * 2 : 1024;
++    auto* pages = static_cast<uint32_t*>(
++        VirtualAllocFromApp(nullptr, capacity * sizeof(uint32_t),
++                            MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
++    if (!pages) return false;
++    if (t.pages) {
++      memcpy(pages, t.pages, t.count * sizeof(uint32_t));
++      VirtualFree(t.pages, 0, MEM_RELEASE);
++    }
++    t.pages = pages;
++    t.capacity = capacity;
++  }
++  t.pages[t.count++] = page;
++  return true;
++}
++
++LONG HandleJitWriteFault(EXCEPTION_POINTERS* info, uintptr_t address) {
++  JitWritePages& t = jit_write_pages;
++  if (t.depth == 0) {
++    wx_unscoped_writes.fetch_add(1, std::memory_order_relaxed);
++    wx_last_unscoped_pc.store(info->ContextRecord->Pc,
++                              std::memory_order_relaxed);
++    return EXCEPTION_CONTINUE_SEARCH;
++  }
++  uint32_t page = static_cast<uint32_t>(address >> kCodePageShift);
++  void* start = reinterpret_cast<void*>(uintptr_t{page} << kCodePageShift);
++  ULONG old_protection;
++  AcquireSRWLockExclusive(&page_writers_lock);
++  // Une faute d'écriture dit que la page n'est pas en RW : on la bascule même
++  // si un compte reste d'une page libérée puis réallouée.
++  bool ok = IsCodePage(address) && page_writers[page] < 255 &&
++            VirtualProtectFromApp(start, kCodePageSize, PAGE_READWRITE,
++                                  &old_protection) &&
++            PushJitWritePage(t, page);
++  if (ok) ++page_writers[page];
++  ReleaseSRWLockExclusive(&page_writers_lock);
++  if (!ok) return EXCEPTION_CONTINUE_SEARCH;
++  wx_write_faults.fetch_add(1, std::memory_order_relaxed);
++  return EXCEPTION_CONTINUE_EXECUTION;
++}
++
++bool HoldsJitWritePage(uintptr_t address) {
++  const JitWritePages& t = jit_write_pages;
++  uint32_t page = static_cast<uint32_t>(address >> kCodePageShift);
++  for (uint32_t i = 0; i < t.count; ++i) {
++    if (t.pages[i] == page) return true;
++  }
++  return false;
++}
++
++LONG WaitForExecutablePage(uintptr_t address) {
++  LARGE_INTEGER frequency, start, now;
++  QueryPerformanceFrequency(&frequency);
++  QueryPerformanceCounter(&start);
++  for (int spin = 0;; ++spin) {
++    MEMORY_BASIC_INFORMATION region;
++    if (!VirtualQuery(reinterpret_cast<void*>(address), &region,
++                      sizeof(region)) ||
++        region.State != MEM_COMMIT || !IsCodePage(address)) {
++      return EXCEPTION_CONTINUE_SEARCH;  // page libérée : vraie faute
++    }
++    DWORD protect = region.Protect & 0xFF;
++    if (protect & kExecuteProtections) break;  // écriture finie : on reprend
++    // Une page de code n'est en RW que le temps d'une écriture de V8 ; toute
++    // autre protection signale une vraie faute.
++    if (protect != PAGE_READWRITE) return EXCEPTION_CONTINUE_SEARCH;
++    // Le thread tient lui-même la page : attendre ne servirait à rien.
++    if (HoldsJitWritePage(address)) return EXCEPTION_CONTINUE_SEARCH;
++    QueryPerformanceCounter(&now);
++    if (now.QuadPart - start.QuadPart > 10 * frequency.QuadPart) {
++      return EXCEPTION_CONTINUE_SEARCH;  // 10 s : écrivain bloqué, on abandonne
++    }
++    if (spin < 64) {
++      YieldProcessor();
++    } else {
++      Sleep(spin < 1024 ? 0 : 1);
++    }
++  }
++  QueryPerformanceCounter(&now);
++  uint64_t ticks = static_cast<uint64_t>(now.QuadPart - start.QuadPart);
++  wx_waits.fetch_add(1, std::memory_order_relaxed);
++  wx_wait_ticks.fetch_add(ticks, std::memory_order_relaxed);
++  uint64_t max = wx_wait_max_ticks.load(std::memory_order_relaxed);
++  while (ticks > max && !wx_wait_max_ticks.compare_exchange_weak(
++                            max, ticks, std::memory_order_relaxed)) {
++  }
++  return EXCEPTION_CONTINUE_EXECUTION;
++}
++
++LONG WINAPI WaitForCodePage(EXCEPTION_POINTERS* info) {
++  const EXCEPTION_RECORD* record = info->ExceptionRecord;
++  if (record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
++      record->NumberParameters < 2) {
++    return EXCEPTION_CONTINUE_SEARCH;
++  }
++  uintptr_t address = record->ExceptionInformation[1];
++  if (!IsCodePage(address)) return EXCEPTION_CONTINUE_SEARCH;
++  switch (record->ExceptionInformation[0]) {
++    case EXCEPTION_EXECUTE_FAULT:
++      return WaitForExecutablePage(address);
++    case EXCEPTION_WRITE_FAULT:
++      return HandleJitWriteFault(info, address);
++    default:
++      return EXCEPTION_CONTINUE_SEARCH;
++  }
++}
++
++void InstallCodePageWaiter() {
++  // Absente des en-têtes « app » : cherchée dans kernelbase, sans import.
++  static const bool installed = [] {
++    using AddVehFn = PVOID(WINAPI*)(ULONG, PVECTORED_EXCEPTION_HANDLER);
++    auto add = reinterpret_cast<AddVehFn>(
++        GetProcAddress(GetModuleHandleW(L"kernelbase.dll"),
++                       "AddVectoredExceptionHandler"));
++    // En tête de liste : ces fautes passagères n'ont pas à être vues ailleurs.
++    return add && add(1, &WaitForCodePage) != nullptr;
++  }();
++  USE(installed);
++}
++
++void* VirtualAllocWrapper(void* address, size_t size, DWORD flags,
++                          DWORD protect) {
++  protect &= ~PAGE_TARGETS_INVALID;  // pas de CFG dans l'app
++  if (protect == PAGE_EXECUTE_READWRITE) protect = PAGE_EXECUTE_READ;
++  if (!(protect & kExecuteProtections)) {
++    void* result = VirtualAllocFromApp(address, size, flags, protect);
++    if (result && (flags & MEM_COMMIT)) MarkCodePages(result, size, false);
++    return result;
++  }
++  InstallCodePageWaiter();
++  ULONG old_protection;
++  // Pages déjà engagées : une seule bascule, sans repasser par RW.
++  if (flags == MEM_COMMIT && address != nullptr &&
++      VirtualProtectFromApp(address, size, protect, &old_protection)) {
++    MarkCodePages(address, size, true);
++    return address;
++  }
++  DWORD initial = (flags & MEM_COMMIT) ? PAGE_READWRITE : PAGE_NOACCESS;
++  void* result = VirtualAllocFromApp(address, size, flags, initial);
++  if (result == nullptr || !(flags & MEM_COMMIT)) return result;
++  if (!VirtualProtectFromApp(result, size, protect, &old_protection)) {
++    DWORD error = GetLastError();
++    if (flags & MEM_RESERVE) VirtualFree(result, 0, MEM_RELEASE);
++    SetLastError(error);
++    return nullptr;
++  }
++  MarkCodePages(result, size, true);
++  return result;
++}
++
++void ForgetCodePages(void* address, size_t size) {
++  MarkCodePages(address, size, false);
++}
++#else
+ void* VirtualAllocWrapper(void* address, size_t size, DWORD flags,
+                           DWORD protect) {
+   if (VirtualAlloc2) {
+@@ -931,6 +1167,9 @@ void* VirtualAllocWrapper(void* address, size_t size, DWORD flags,
+   }
+ }
+ 
++void ForgetCodePages(void* address, size_t size) {}
++#endif  // V8_HOST_ARCH_ARM
++
+ uint8_t* VirtualAllocWithHint(size_t size, DWORD flags, DWORD protect,
+                               void* hint) {
+   LPVOID base = VirtualAllocWrapper(hint, size, flags, protect);
+@@ -993,6 +1232,48 @@ void CheckIsOOMError(int error) {
+ 
+ }  // namespace
+ 
++#if V8_HOST_ARCH_ARM
++// Rhénium : attentes de WaitForCodePage depuis le démarrage (nombre, durée
++// cumulée et plus longue en millisecondes), lues par la sonde.
++extern "C" void rhenium_wx_stats(uint32_t* waits, double* total_ms,
++                                 double* max_ms) {
++  LARGE_INTEGER frequency;
++  QueryPerformanceFrequency(&frequency);
++  double ms_per_tick = 1000.0 / static_cast<double>(frequency.QuadPart);
++  *waits = wx_waits.load(std::memory_order_relaxed);
++  *total_ms = wx_wait_ticks.load(std::memory_order_relaxed) * ms_per_tick;
++  *max_ms = wx_wait_max_ticks.load(std::memory_order_relaxed) * ms_per_tick;
++}
++
++// Rhénium : pages ouvertes en RW sur faute, écritures hors portée (qui
++// plantent) et adresse de la dernière.
++extern "C" void rhenium_wx_write_stats(uint32_t* faults, uint32_t* unscoped,
++                                       uintptr_t* last_unscoped_pc) {
++  *faults = wx_write_faults.load(std::memory_order_relaxed);
++  *unscoped = wx_unscoped_writes.load(std::memory_order_relaxed);
++  *last_unscoped_pc = wx_last_unscoped_pc.load(std::memory_order_relaxed);
++}
++
++void EnterJitWriteScope() { ++jit_write_pages.depth; }
++
++void ExitJitWriteScope() {
++  JitWritePages& t = jit_write_pages;
++  if (--t.depth > 0 || t.count == 0) return;
++  AcquireSRWLockExclusive(&page_writers_lock);
++  for (uint32_t i = 0; i < t.count; ++i) {
++    uint32_t page = t.pages[i];
++    if (page_writers[page] > 0 && --page_writers[page] > 0) continue;
++    uintptr_t address = uintptr_t{page} << kCodePageShift;
++    if (!IsCodePage(address)) continue;  // libérée entre-temps
++    ULONG old_protection;
++    VirtualProtectFromApp(reinterpret_cast<void*>(address), kCodePageSize,
++                          PAGE_EXECUTE_READ, &old_protection);
++  }
++  t.count = 0;
++  ReleaseSRWLockExclusive(&page_writers_lock);
++}
++#endif  // V8_HOST_ARCH_ARM
++
+ // static
+ void* OS::Allocate(void* hint, size_t size, size_t alignment,
+                    MemoryPermission access,
+@@ -1019,6 +1300,7 @@ void OS::Free(void* address, size_t size) {
+   DCHECK_EQ(0, reinterpret_cast<uintptr_t>(address) % AllocatePageSize());
+   DCHECK_EQ(0, size % AllocatePageSize());
+   USE(size);
++  ForgetCodePages(address, size);  // Rhénium : voir WaitForCodePage
+   CHECK_NE(0, VirtualFree(address, 0, MEM_RELEASE));
+ }
+ 
+@@ -1054,6 +1336,7 @@ void OS::FreeShared(void* address, size_t size) {
+ void OS::Release(void* address, size_t size) {
+   DCHECK_EQ(0, reinterpret_cast<uintptr_t>(address) % CommitPageSize());
+   DCHECK_EQ(0, size % CommitPageSize());
++  ForgetCodePages(address, size);  // Rhénium : voir WaitForCodePage
+   CHECK_NE(0, VirtualFree(address, size, MEM_DECOMMIT));
+ }
+ 
+@@ -1062,6 +1345,7 @@ bool OS::SetPermissions(void* address, size_t size, MemoryPermission access) {
+   DCHECK_EQ(0, reinterpret_cast<uintptr_t>(address) % CommitPageSize());
+   DCHECK_EQ(0, size % CommitPageSize());
+   if (access == MemoryPermission::kNoAccess) {
++    ForgetCodePages(address, size);  // Rhénium : voir WaitForCodePage
+     return VirtualFree(address, size, MEM_DECOMMIT) != 0;
+   }
+   DWORD protect = GetProtectionFromMemoryPermission(access);
+@@ -1080,7 +1364,16 @@ void OS::SetDataReadOnly(void* address, size_t size) {
+   DCHECK_EQ(0, size % CommitPageSize());
+ 
+   DWORD old_protection;
++#if V8_HOST_ARCH_ARM
++  // Rhénium : VirtualProtect est réservé au bureau ; une app UWP passe par
++  // VirtualProtectFromApp.
++  ULONG old_protection_app;
++  CHECK(VirtualProtectFromApp(address, size, PAGE_READONLY,
++                              &old_protection_app));
++  old_protection = old_protection_app;
++#else
+   CHECK(VirtualProtect(address, size, PAGE_READONLY, &old_protection));
++#endif
+   CHECK(old_protection == PAGE_READWRITE || old_protection == PAGE_WRITECOPY);
+ }
+ 
+@@ -1134,6 +1427,7 @@ bool OS::DecommitPages(void* address, size_t size) {
+   // https://docs.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc
+   // for MEM_COMMIT: "The function also guarantees that when the caller later
+   // initially accesses the memory, the contents will be zero."
++  ForgetCodePages(address, size);  // Rhénium : voir WaitForCodePage
+   return VirtualFree(address, size, MEM_DECOMMIT) != 0;
+ }
+ 
+@@ -1936,7 +2230,7 @@ void Stack::SetCurrentThreadStackBounds(uintptr_t limit, uintptr_t base) {
+ 
+ // static
+ Stack::StackSlot Stack::GetCurrentStackPosition() {
+-#if V8_CC_MSVC
++#if V8_CC_MSVC && !V8_HOST_ARCH_ARM  // Rhénium : clang n'a pas cet intrinsèque sur ARM32
+   return _AddressOfReturnAddress();
+ #else
+   return __builtin_frame_address(0);
+diff --git a/src/base/platform/platform.h b/src/base/platform/platform.h
+index 7692528c10..f55adae5b1 100644
+--- a/src/base/platform/platform.h
++++ b/src/base/platform/platform.h
+@@ -751,6 +751,14 @@ class V8_BASE_EXPORT Stack {
+ V8_BASE_EXPORT void SetJitWriteProtected(int enable);
+ #endif
+ 
++#if V8_OS_WIN && V8_HOST_ARCH_ARM
++// Rhénium : portée d'écriture dans le code du thread courant (W10M refuse RWX).
++// Les pages de code sont RX ; dans une portée, une écriture fait passer sa page
++// de 4 Ko en RW, et la sortie de la portée la plus externe les remet en RX.
++V8_BASE_EXPORT void EnterJitWriteScope();
++V8_BASE_EXPORT void ExitJitWriteScope();
++#endif
++
+ }  // namespace v8::base
+ 
+ #endif  // V8_BASE_PLATFORM_PLATFORM_H_
+diff --git a/src/base/platform/time.cc b/src/base/platform/time.cc
+index 8c824e3aca..2cb7a9e313 100644
+--- a/src/base/platform/time.cc
++++ b/src/base/platform/time.cc
+@@ -703,7 +703,7 @@ TimeTicks InitialTimeTicksNowFunction() {
+   return g_time_ticks_now_function();
+ }
+ 
+-#if V8_HOST_ARCH_ARM64
++#if V8_HOST_ARCH_ARM64 || V8_HOST_ARCH_ARM  // Rhénium : pas de TSC sur ARM32
+ // From MSDN, FILETIME "Contains a 64-bit value representing the number of
+ // 100-nanosecond intervals since January 1, 1601 (UTC)."
+ int64_t FileTimeToMicroseconds(const FILETIME& ft) {
+@@ -821,7 +821,7 @@ ThreadTicks ThreadTicks::Now() {
+ ThreadTicks ThreadTicks::GetForThread(const HANDLE& thread_handle) {
+   DCHECK(IsSupported());
+ 
+-#if V8_HOST_ARCH_ARM64
++#if V8_HOST_ARCH_ARM64 || V8_HOST_ARCH_ARM  // Rhénium : pas de TSC sur ARM32
+   // QueryThreadCycleTime versus TSCTicksPerSecond doesn't have much relation to
+   // actual elapsed time on Windows on Arm, because QueryThreadCycleTime is
+   // backed by the actual number of CPU cycles executed, rather than a
+@@ -859,12 +859,12 @@ bool ThreadTicks::IsSupportedWin() {
+ 
+ // static
+ void ThreadTicks::WaitUntilInitializedWin() {
+-#ifndef V8_HOST_ARCH_ARM64
++#if !V8_HOST_ARCH_ARM64 && !V8_HOST_ARCH_ARM  // Rhénium : pas de TSC sur ARM32
+   while (TSCTicksPerSecond() == 0) ::Sleep(10);
+ #endif
+ }
+ 
+-#ifndef V8_HOST_ARCH_ARM64
++#if !V8_HOST_ARCH_ARM64 && !V8_HOST_ARCH_ARM  // Rhénium : pas de TSC sur ARM32
+ double ThreadTicks::TSCTicksPerSecond() {
+   DCHECK(IsSupported());
+ 
+diff --git a/src/base/platform/time.h b/src/base/platform/time.h
+index 813241ecbb..fe32e0b715 100644
+--- a/src/base/platform/time.h
++++ b/src/base/platform/time.h
+@@ -498,7 +498,7 @@ class V8_BASE_EXPORT ThreadTicks final
+   explicit constexpr ThreadTicks(int64_t ticks) : TimeBase(ticks) {}
+ 
+ #if V8_OS_WIN
+-#if V8_HOST_ARCH_ARM64
++#if V8_HOST_ARCH_ARM64 || V8_HOST_ARCH_ARM  // Rhénium : pas de TSC sur ARM32
+   // TSCTicksPerSecond is not supported on Windows on Arm systems because the
+   // cycle-counting methods use the actual CPU cycle count, and not a consistent
+   // incrementing counter.
+diff --git a/src/codegen/arm/constants-arm.h b/src/codegen/arm/constants-arm.h
+index 64446a0216..76a0911bd3 100644
+--- a/src/codegen/arm/constants-arm.h
++++ b/src/codegen/arm/constants-arm.h
+@@ -15,7 +15,9 @@
+ #include "src/utils/utils.h"
+ 
+ // ARM EABI is required.
+-#if defined(__arm__) && !defined(__ARM_EABI__)
++// Rhénium : Windows ARM32 ne définit pas __ARM_EABI__ mais suit l'AAPCS
++// avec flottants matériels (__ARM_PCS_VFP), comme Linux armhf.
++#if defined(__arm__) && !defined(__ARM_EABI__) && !defined(_WIN32)
+ #error ARM EABI support is required.
+ #endif
+ 
+diff --git a/src/codegen/arm/cpu-arm.cc b/src/codegen/arm/cpu-arm.cc
+index 6fc1dd9659..38e666cd1f 100644
+--- a/src/codegen/arm/cpu-arm.cc
++++ b/src/codegen/arm/cpu-arm.cc
+@@ -12,6 +12,10 @@
+ #include <sys/types.h>
+ #elif V8_OS_STARBOARD
+ #define __ARM_NR_cacheflush 0x0f0002
++#elif defined(_WIN32)
++// Rhénium : FlushInstructionCache. _WIN32 et non V8_OS_WIN, pas encore défini ici.
++#include "src/base/win32-headers.h"  // macros de V8 pour windows.h
++#include <windows.h>
+ #else
+ #include <sys/syscall.h>  // for cache flushing.
+ #endif
+@@ -34,6 +38,9 @@ V8_NOINLINE void CpuFeatures::FlushICache(void* start, size_t size) {
+   struct arm_sync_icache_args args = {
+       .addr = reinterpret_cast<uintptr_t>(start), .len = size};
+   sysarch(ARM_SYNC_ICACHE, reinterpret_cast<void*>(&args));
++#elif defined(_WIN32)
++  // Rhénium : Windows ARM32.
++  ::FlushInstructionCache(::GetCurrentProcess(), start, size);
+ #else
+   register uint32_t beg asm("r0") = reinterpret_cast<uint32_t>(start);
+   register uint32_t end asm("r1") = beg + size;
+diff --git a/src/codegen/arm/macro-assembler-arm.cc b/src/codegen/arm/macro-assembler-arm.cc
+index a753eb6f5e..ce78e6e500 100644
+--- a/src/codegen/arm/macro-assembler-arm.cc
++++ b/src/codegen/arm/macro-assembler-arm.cc
+@@ -1711,6 +1711,10 @@ void MacroAssembler::InvokePrologue(Register expected_parameter_count,
+     AllocateStackSpace(scratch);
+     mov(dest, sp);
+     mov(num, actual_parameter_count);
++    // Rhénium : sous Windows, AllocateStackSpace sonde la pile avec un cmp qui
++    // écrase les drapeaux ; le premier test de la boucle (b gt) ne doit pas
++    // reposer sur eux, sinon la copie des arguments est sautée.
++    cmp(num, Operand(0));
+     b(&check);
+     bind(&copy);
+     ldr(scratch, MemOperand(src, kSystemPointerSize, PostIndex));
+diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
+index 200a57e757..ea2d088ff2 100644
+--- a/src/codegen/code-stub-assembler.cc
++++ b/src/codegen/code-stub-assembler.cc
+@@ -1567,7 +1567,7 @@ void CodeStubAssembler::BranchIfFastIterableToListInterceptor(
+ 
+   // Check if the interceptor supports fast iterable to list conversion.
+   TNode<Uint8T> flags =
+-      LoadObjectField<Uint8T>(map, offsetof(JSInterceptorMap, flags_));
++      LoadObjectField<Uint8T>(map, JSInterceptorMap::kFlagsByteOffset);
+   TNode<BoolT> supports_fast =
+       IsSetWord32<JSInterceptorMap::SupportsFastIterableToListBit>(flags);
+   GotoIfNot(supports_fast, if_false);
+@@ -1610,7 +1610,7 @@ void CodeStubAssembler::BranchIfFastIterableToListInterceptor(
+         UpdateWord32<JSInterceptorMap::SupportsFastIterableToListBit>(
+             flags, Uint32Constant(0)));
+ 
+-    StoreObjectFieldNoWriteBarrier(map, offsetof(JSInterceptorMap, flags_),
++    StoreObjectFieldNoWriteBarrier(map, JSInterceptorMap::kFlagsByteOffset,
+                                    cleared_flags);
+     Goto(if_false);
+   }
+diff --git a/src/common/code-memory-access-inl.h b/src/common/code-memory-access-inl.h
+index 959227786f..f3d51a0237 100644
+--- a/src/common/code-memory-access-inl.h
++++ b/src/common/code-memory-access-inl.h
+@@ -16,7 +16,7 @@
+ #if V8_HAS_PKU_JIT_WRITE_PROTECT
+ #include "src/base/platform/memory-protection-key.h"
+ #endif
+-#if V8_HAS_PTHREAD_JIT_WRITE_PROTECT
++#if V8_HAS_PTHREAD_JIT_WRITE_PROTECT || (V8_OS_WIN && V8_HOST_ARCH_ARM)
+ #include "src/base/platform/platform.h"
+ #endif
+ #if V8_HAS_BECORE_JIT_WRITE_PROTECT
+@@ -382,6 +382,19 @@ void RwxMemoryWriteScope::SetExecutable() {
+       ThreadIsolation::pkey(), base::MemoryProtectionKey::kDisableWrite);
+ }
+ 
++#elif V8_OS_WIN && V8_HOST_ARCH_ARM
++
++// Rhénium : W^X de Windows 10 Mobile, bascule par page sur faute
++// (base/platform/platform-win32.cc).
++// static
++bool RwxMemoryWriteScope::IsSupported() { return true; }
++
++// static
++void RwxMemoryWriteScope::SetWritable() { base::EnterJitWriteScope(); }
++
++// static
++void RwxMemoryWriteScope::SetExecutable() { base::ExitJitWriteScope(); }
++
+ #else  // !V8_HAS_PTHREAD_JIT_WRITE_PROTECT && !V8_TRY_USE_PKU_JIT_WRITE_PROTECT
+ 
+ // static
+diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
+index 27bf62003b..70f061aebf 100644
+--- a/src/execution/isolate.cc
++++ b/src/execution/isolate.cc
+@@ -202,7 +202,17 @@ namespace internal {
+ #endif
+ 
+ const uint8_t* DefaultEmbeddedBlobCode() {
++#if V8_OS_WIN && V8_TARGET_ARCH_ARM
++  // Rhénium : sous Windows ARM32, l'éditeur de liens ajoute le bit Thumb à toute
++  // adresse de symbole située dans une section exécutable. Le blob contient de
++  // l'A32 et commence sur 32 octets : on retire ce bit, sinon chaque appel de
++  // builtin basculerait en Thumb.
++  return reinterpret_cast<const uint8_t*>(
++      reinterpret_cast<uintptr_t>(v8_Default_embedded_blob_code_) &
++      ~uintptr_t{1});
++#else
+   return v8_Default_embedded_blob_code_;
++#endif
+ }
+ uint32_t DefaultEmbeddedBlobCodeSize() {
+   return v8_Default_embedded_blob_code_size_;
+@@ -6462,7 +6472,7 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
+     PrintF("Set up central stack object (limit: %p, base: %p)\n",
+            stack->jslimit(), reinterpret_cast<void*>(stack->base()));
+   }
+-#if V8_TARGET_OS_WIN
++#if defined(V8_TARGET_OS_WIN)
+   // Stack::GetStackStart() is meant to return the native stack start, but we
+   // update the TEB's StackBase during wasm stack switching. So call it during
+   // initialization to ensure that it caches the correct value.
+diff --git a/src/heap/base/asm/arm/push_registers_asm.cc b/src/heap/base/asm/arm/push_registers_asm.cc
+index ccf0444b90..50245bc9a2 100644
+--- a/src/heap/base/asm/arm/push_registers_asm.cc
++++ b/src/heap/base/asm/arm/push_registers_asm.cc
+@@ -18,8 +18,18 @@
+ // https://en.wikipedia.org/wiki/Calling_convention#ARM_(A32)
+ // http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.faqs/ka4127.html
+ asm(".globl PushAllRegistersAndIterateStack             \n"
++#ifdef _WIN32
++    // Rhénium : COFF Windows ARM32 (Thumb-2). Symbole de type fonction pour que
++    // son adresse porte le bit Thumb.
++    ".def PushAllRegistersAndIterateStack               \n"
++    ".scl 2                                             \n"
++    ".type 32                                           \n"
++    ".endef                                             \n"
++    ".thumb_func                                        \n"
++#else   // !_WIN32
+     ".type PushAllRegistersAndIterateStack, %function   \n"
+     ".hidden PushAllRegistersAndIterateStack            \n"
++#endif  // !_WIN32
+     "PushAllRegistersAndIterateStack:                   \n"
+     // Push all callee-saved registers and save return address.
+     // Only {r4-r11} are callee-saved registers. Push r3 in addition to align
+@@ -37,7 +47,7 @@ asm(".globl PushAllRegistersAndIterateStack             \n"
+     "  add sp, sp, #36                                  \n"
+     // Pop lr into pc which returns and switches mode if needed.
+     "  pop {pc}                                         \n"
+-#if !defined(__APPLE__)
++#if !defined(__APPLE__) && !defined(_WIN32)  // Rhénium : pas de .size en COFF
+     ".Lfunc_end0:                                       \n"
+     ".size PushAllRegistersAndIterateStack, "
+     ".Lfunc_end0-PushAllRegistersAndIterateStack\n"
+diff --git a/src/libsampler/sampler.cc b/src/libsampler/sampler.cc
+index 16cd153d58..9ce9e09788 100644
+--- a/src/libsampler/sampler.cc
++++ b/src/libsampler/sampler.cc
+@@ -633,6 +633,12 @@ void Sampler::DoSample() {
+     state.pc = reinterpret_cast<void*>(context.Pc);
+     state.sp = reinterpret_cast<void*>(context.Sp);
+     state.fp = reinterpret_cast<void*>(context.Fp);
++#elif V8_HOST_ARCH_ARM
++    // Rhénium : Windows ARM32, R11 sert de pointeur de cadre.
++    state.pc = reinterpret_cast<void*>(context.Pc);
++    state.sp = reinterpret_cast<void*>(context.Sp);
++    state.fp = reinterpret_cast<void*>(context.R11);
++    state.lr = reinterpret_cast<void*>(context.Lr);
+ #else
+     state.pc = reinterpret_cast<void*>(context.Eip);
+     state.sp = reinterpret_cast<void*>(context.Esp);
+diff --git a/src/objects/js-interceptor-map-inl.h b/src/objects/js-interceptor-map-inl.h
+index e10726eb85..6975188e21 100644
+--- a/src/objects/js-interceptor-map-inl.h
++++ b/src/objects/js-interceptor-map-inl.h
+@@ -44,15 +44,19 @@ void JSInterceptorMap::set_fast_case_validity_cell(Tagged<Cell> cell,
+ }
+ 
+ bool JSInterceptorMap::supports_fast_iterable_to_list() const {
+-  return SupportsFastIterableToListBit::decode(flags_);
++  return SupportsFastIterableToListBit::decode(flags_value());
+ }
+ void JSInterceptorMap::set_supports_fast_iterable_to_list(bool value) {
+-  flags_ = SupportsFastIterableToListBit::update(flags_, value);
++  flags_ref() = SupportsFastIterableToListBit::update(flags_value(), value);
+ }
+ 
+ void JSInterceptorMap::init_flags_and_clear_extended_padding() {
++#if V8_CC_MSVC
++  memset(extended_bytes_, 0, sizeof(extended_bytes_));
++#else
+   flags_ = 0;
+   memset(extended_padding_, 0, sizeof(extended_padding_));
++#endif
+ }
+ 
+ Tagged<InterceptorInfo> Map::GetNamedInterceptor() const {
+diff --git a/src/objects/js-interceptor-map.h b/src/objects/js-interceptor-map.h
+index 5c9b246a93..f501ef5142 100644
+--- a/src/objects/js-interceptor-map.h
++++ b/src/objects/js-interceptor-map.h
+@@ -42,13 +42,31 @@ V8_OBJECT class JSInterceptorMap : public ExtendedMap {
+   inline void init_flags_and_clear_extended_padding();
+ 
+  public:
++  static const int kFlagsByteOffset;
++
++#if V8_CC_MSVC
++  // Rhénium : flags et extended_padding logent dans
++  // ExtendedMap::extended_bytes_ (voir map.h).
++  uint8_t& flags_ref() { return extended_bytes_[0]; }
++  uint8_t flags_value() const { return extended_bytes_[0]; }
++#else
+   uint8_t flags_;
+   uint8_t extended_padding_[kTaggedSize - 2];
++  uint8_t& flags_ref() { return flags_; }
++  uint8_t flags_value() const { return flags_; }
++#endif
+   TaggedMember<InterceptorInfo> named_interceptor_;
+   TaggedMember<InterceptorInfo> indexed_interceptor_;
+   TaggedMember<Cell> fast_case_validity_cell_;
+ } V8_OBJECT_END;
+ 
++inline constexpr int JSInterceptorMap::kFlagsByteOffset =
++    offsetof(ExtendedMap, bit_field_ex_) + 1;
++#if V8_CC_MSVC
++static_assert(offsetof(JSInterceptorMap, named_interceptor_) ==
++              sizeof(Map) + kTaggedSize);
++#endif
++
+ }  // namespace v8::internal
+ 
+ #include "src/objects/object-macros-undef.h"
+diff --git a/src/objects/map.h b/src/objects/map.h
+index a33c7f01ac..59faa9f9b8 100644
+--- a/src/objects/map.h
++++ b/src/objects/map.h
+@@ -1250,6 +1250,11 @@ V8_ABSTRACT_OBJECT class ExtendedMap : public Map {
+ 
+   std::atomic<uint8_t> bit_field_ex_;
+   // Leaves kTaggedSize-1 unused bytes, they will be used by subclasses.
++#if V8_CC_MSVC
++  // Rhénium : l'ABI Microsoft ne réutilise pas le remplissage de fin d'une
++  // base ; les sous-classes logent leurs premiers octets ici.
++  uint8_t extended_bytes_[kTaggedSize - 1];
++#endif
+ } V8_OBJECT_END;
+ 
+ constexpr int ExtendedMapSizeForKind(ExtendedMapKind kind);
+diff --git a/src/snapshot/embedded/platform-embedded-file-writer-win.cc b/src/snapshot/embedded/platform-embedded-file-writer-win.cc
+index bf76435717..28f54ea25d 100644
+--- a/src/snapshot/embedded/platform-embedded-file-writer-win.cc
++++ b/src/snapshot/embedded/platform-embedded-file-writer-win.cc
+@@ -42,7 +42,9 @@ namespace internal {
+ 
+ // Name mangling.
+ // Symbols are prefixed with an underscore on 32-bit architectures.
+-#if !defined(V8_TARGET_ARCH_X64) && !defined(V8_TARGET_ARCH_ARM64)
++// Rhénium : seulement sur x86 ; Windows ARM32 ne décore pas les noms C.
++#if !defined(V8_TARGET_ARCH_X64) && !defined(V8_TARGET_ARCH_ARM64) && \
++    !defined(V8_TARGET_ARCH_ARM)
+ #define SYMBOL_PREFIX "_"
+ #else
+ #define SYMBOL_PREFIX ""
+diff --git a/src/torque/implementation-visitor.cc b/src/torque/implementation-visitor.cc
+index eec2a04006..e12c54261a 100644
+--- a/src/torque/implementation-visitor.cc
++++ b/src/torque/implementation-visitor.cc
+@@ -4088,6 +4088,13 @@ void CppClassGenerator::GenerateCppObjectLayoutDefinitionAsserts() {
+   g.Finish();
+   impl_ << "\n";
+ 
++  // Rhénium : l'ABI Microsoft ne réutilise pas le remplissage de fin d'une
++  // base ; ExtendedMap y déclare ces octets elle-même (voir map.h), et ses
++  // sous-classes n'ont pas de membre C++ pour les champs qui y logent.
++  const bool msvc_layout_differs =
++      name_ == "ExtendedMap" || name_ == "JSInterceptorMap";
++  if (msvc_layout_differs) impl_ << "#if !V8_CC_MSVC\n";
++
+   first_indexed_field_emitted = false;
+   for (const auto& f : type_->fields()) {
+     // Fields with conditional (runtime-computed) offsets have no Torque-
+@@ -4119,6 +4126,7 @@ void CppClassGenerator::GenerateCppObjectLayoutDefinitionAsserts() {
+   if (!type_->IsAbstract() && type_->HasStaticSize()) {
+     impl_ << "  static_assert(kSize == sizeof(" + name_ + "));\n";
+   }
++  if (msvc_layout_differs) impl_ << "#endif  // !V8_CC_MSVC\n";
+ 
+   impl_ << "};\n\n";
+ }
+diff --git a/src/utils/utils.cc b/src/utils/utils.cc
+index e59717a5c5..1ec1a6c038 100644
+--- a/src/utils/utils.cc
++++ b/src/utils/utils.cc
+@@ -214,7 +214,7 @@ bool DoubleToBoolean(double d) {
+ }
+ 
+ uintptr_t GetCurrentStackPosition() {
+-#if V8_CC_MSVC
++#if V8_CC_MSVC && !V8_HOST_ARCH_ARM  // Rhénium : clang n'a pas cet intrinsèque sur ARM32
+   return reinterpret_cast<uintptr_t>(_AddressOfReturnAddress());
+ #else
+   return reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
+diff --git a/src/wasm/turboshaft-graph-interface-inl.h b/src/wasm/turboshaft-graph-interface-inl.h
+index c64b53a58c..8643fef64d 100644
+--- a/src/wasm/turboshaft-graph-interface-inl.h
++++ b/src/wasm/turboshaft-graph-interface-inl.h
+@@ -193,7 +193,7 @@ auto WasmGraphBuilderBase<Assembler>::BuildSwitchToTheCentralStack(
+   // privileged external C call if the sandbox hardware support is enabled.
+   // On Windows, the C call also updates the TEB which is not supported in
+   // generated code yet.
+-#if defined(V8_ENABLE_SANDBOX_HARDWARE_SUPPORT) || V8_TARGET_OS_WIN
++#if defined(V8_ENABLE_SANDBOX_HARDWARE_SUPPORT) || defined(V8_TARGET_OS_WIN)
+   auto sig = FixedSizeSignature<MachineType>::Params(MachineType::Pointer(),
+                                                      MachineType::Pointer())
+                  .Returns(MachineType::Pointer());
+@@ -263,7 +263,7 @@ void WasmGraphBuilderBase<Assembler>::BuildSwitchBackFromCentralStack(
+   // privileged external C call if the sandbox hardware support is enabled.
+   // On Windows, the C call also updates the TEB which is not supported in
+   // generated code yet.
+-#if defined(V8_ENABLE_SANDBOX_HARDWARE_SUPPORT) || V8_TARGET_OS_WIN
++#if defined(V8_ENABLE_SANDBOX_HARDWARE_SUPPORT) || defined(V8_TARGET_OS_WIN)
+   auto sig = FixedSizeSignature<MachineType>::Params(MachineType::Pointer());
+   IF_NOT (LIKELY(__ WordPtrEqual(old_sp, __ IntPtrConstant(0)))) {
+     CallC(&sig, ExternalReference::wasm_switch_from_the_central_stack_for_js(),
