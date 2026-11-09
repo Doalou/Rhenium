@@ -7,7 +7,10 @@
   ./build-shell.ps1 -OutDir ..\..\chromium\src\out\content-arm   # appelé par ..\build-content.ps1
 #>
 param(
-  [Parameter(Mandatory)] [string] $OutDir
+  [Parameter(Mandatory)] [string] $OutDir,
+  # Autre coquille et autre rhenium_engine.h (montée de Chromium, ..\..\maj-chromium).
+  [string] $Source = "$PSScriptRoot\shell_app.cpp",
+  [string] $AppDir = "$PSScriptRoot\..\app"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,7 +41,7 @@ $obj = "$work\shell_app.obj"
 $cl = @('/nologo', '/c', '/Brepro', '/guard:cf', '/std:c++20', '/EHsc', '/O2', '/MT', '/W3', '/permissive-', '/utf-8', '/bigobj',
   '/DWINAPI_FAMILY=WINAPI_FAMILY_APP', '/DUNICODE', '/D_UNICODE', '/DNOMINMAX',
   "/I$work\cppwinrt-arm32", "/I$inc\ucrt", "/I$inc\um", "/I$inc\shared", "/I$inc\winrt", "/I$cppwinrt",
-  "/I$msvc\include", "/I$PSScriptRoot\..\app", "/Fo$obj", "$PSScriptRoot\shell_app.cpp")
+  "/I$msvc\include", "/I$AppDir", "/Fo$obj", $Source)
 $output = & "$msvc\bin\Hostx64\arm\cl.exe" @cl 2>&1
 if ($LASTEXITCODE -ne 0) { $output | Out-Host; throw "cl.exe a échoué (code $LASTEXITCODE)" }
 

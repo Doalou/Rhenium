@@ -57,14 +57,26 @@ if ($Appx) {
   $title = $manifest.Package.Properties.DisplayName
 }
 
-# Une version plus ancienne est mise à jour sur place, données de l'app comprises. Une version
-# égale ou plus récente est d'abord retirée (WinAppDeployCmd ne réinstalle pas un paquet de même
-# version), ce qui efface les données, comme -Clean.
+# Une version plus ancienne est mise à jour sur place, données de l'app comprises. La même version
+# est laissée telle quelle, une plus récente refusée : les retirer (WinAppDeployCmd ne réinstalle
+# pas un paquet de même version) efface les données, ce que seul -Clean demande.
 $newVersion = if ($Appx) { [version] $manifest.Package.Identity.Version } else { $null }
-$installed = (& $tool list @target) | Where-Object { $_ -match "^$([regex]::Escape($identity))_" } | ForEach-Object { $_.Trim() }
+$list = & $tool list @target
+if ($LASTEXITCODE -ne 0) {
+  $list | Out-Host
+  throw "Liste des apps refusée (code $LASTEXITCODE) : téléphone verrouillé ?"
+}
+$installed = $list | Where-Object { $_ -match "^$([regex]::Escape($identity))_" } | ForEach-Object { $_.Trim() }
 foreach ($name in $installed) {
   $oldVersion = [version] ($name -split '_')[1]
-  if ($Uninstall -or $Clean -or -not $newVersion -or $oldVersion -ge $newVersion) {
+  if (-not ($Uninstall -or $Clean) -and $newVersion -and $oldVersion -eq $newVersion) {
+    Write-Host "$name est déjà installé." -ForegroundColor Green
+    return
+  }
+  if (-not ($Uninstall -or $Clean) -and $newVersion -and $oldVersion -gt $newVersion) {
+    throw "$name est plus récent que le paquet : -Clean pour le remplacer (données effacées)."
+  }
+  if ($Uninstall -or $Clean -or -not $newVersion) {
     Write-Host "Désinstallation de $name (données de l'app effacées)"
     & $tool uninstall -package $name @target
   } else {

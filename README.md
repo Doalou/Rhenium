@@ -40,40 +40,41 @@ Une nouvelle version s'installe par-dessus l'ancienne sans effacer les données.
 
 ## Compiler
 
-Ce n'est pas un petit build : il faut environ 40 Go de disque et plusieurs heures pour la première compilation.
+Ce n'est pas un petit build : il faut plusieurs dizaines de Go de disque et plusieurs heures pour la première compilation.
 
 Outils :
 
 - Windows et PowerShell 7 ;
 - Visual Studio 2022 avec le toolset MSVC **14.44** et ses outils ARM32. Les toolsets suivants ne savent plus compiler pour ARM32 : il faut garder une installation du 14.44 qu'on ne met plus à jour. ATL ARM32 vient du toolset 14.30. Les scripts trouvent eux-mêmes ces toolsets avec vswhere ;
-- le SDK Windows 10.0.19041 ;
+- les SDK Windows 10.0.26100 (en-têtes) et 10.0.19041 (bibliothèques ARM32, le dernier à en livrer) ;
+- le clang de Chromium (`llvmorg-24-init-7747-g62397f8b-53`, paquet `Win/clang` de `commondatastorage.googleapis.com/chromium-browser-clang`), décompressé dans `toolchains\clang-156` ;
 - LLVM 23 (testé avec clang-cl 23.1.3), installé dans `C:\Program Files\LLVM` ;
 - Python 3.
 
-Le dépôt doit être dans un chemin sans accent ni espace, par exemple `F:\Rhenium`.
+Les scripts supposent le dépôt dans `F:\Rhenium`.
 
 Récupérer les sources, une seule fois :
 
 ```powershell
-.\j1-base\fetch.ps1     # Chromium 116.0.5845.228, gn et ninja
-.\j2\fetch.ps1          # dépendances du DEPS
-.\j4\fetch-ubol.ps1     # uBlock Origin Lite
-.\j5\fetch-pdfjs.ps1    # PDF.js
+.\maj-chromium\fetch.ps1 -Content     # Chromium 156.0.8078.88 (arbre partiel), gn, ninja, Rust
+.\maj-chromium\gen-loop.ps1 -Script build-content.ps1 -MaxRounds 200
+.\j4\fetch-ubol.ps1                   # uBlock Origin Lite
+.\j5\fetch-pdfjs.ps1                  # PDF.js
 ```
 
-Compiler, empaqueter et installer sur un téléphone branché en USB :
+`gen-loop.ps1` relance gn et récupère chaque fichier qu'il réclame. Compiler, empaqueter et installer sur un téléphone branché en USB :
 
 ```powershell
-.\j2\build-content.ps1 -KeepGoing
-.\j2\package-shell.ps1
+.\maj-chromium\ninja-loop.ps1 -Build -OutDir out\content-arm -Targets rhenium_content, rhenium_shell
+.\j2\package-shell.ps1 -OutDir F:\Rhenium\chromium-next\src\out\content-arm
 .\sonde\deploy.ps1 -Ip 127.0.0.1 -Appx .\j2\out\RheniumShell_arm.appx
 ```
 
-`build-content.ps1` applique les correctifs à l'arbre Chromium, lance gn puis ninja. Le paquet est signé par un certificat de développement créé au premier empaquetage dans `sonde\certs`.
+`ninja-loop.ps1 -Build` lance `maj-chromium\build-content.ps1` (correctifs, gn, ninja) et récupère les fichiers que la compilation réclame encore. Le paquet est signé par un certificat de développement créé au premier empaquetage dans `sonde\certs`. La note `maj-chromium\README.md` détaille la montée de la 116 à la 156.
 
 ## Comment c'est fait
 
-Chromium n'a jamais tourné ni sur Windows ARM32 ni en app UWP. Rhénium part de Chromium 116.0.5845.228 et ajoute une cible `target_os="winuwp"`, `target_cpu="arm"`.
+Chromium n'a jamais tourné ni sur Windows ARM32 ni en app UWP. Rhénium suit Chromium 156.0.8078.88 (canal Extended), après une première version sur la 116.0.5845.228, et ajoute une cible `target_os="winuwp"`, `target_cpu="arm"`.
 
 - Chromium est compilé par clang-cl, sans exceptions C++ (LLVM ne les gère pas sur ARM32 Windows). L'interface est en C++/WinRT, compilée par MSVC, dans le même exécutable.
 - Une app UWP sur mobile ne peut pas lancer d'autres processus : navigateur, rendu, réseau et audio sont des threads d'un seul processus.
@@ -92,6 +93,7 @@ Les modifications de Chromium sont gardées sous forme de correctifs, appliqués
 | `j3\` | Toucher, saisie, vidéo |
 | `j4\` | Extensions et uBlock Origin Lite |
 | `j5\` | Profil, favoris, téléchargements, PDF, version pour ordinateur, mode sombre |
+| `maj-chromium\` | Montée vers Chromium 156 : correctifs, scripts, moteur et interface de la version publiée |
 | `perf\` | Bancs de performance |
 
 | Jalon | État |
@@ -102,6 +104,7 @@ Les modifications de Chromium sont gardées sous forme de correctifs, appliqués
 | J3, navigation tactile | Atteint |
 | J4, extensions | Atteint |
 | J5, v1 | Atteint (Continuum non traité) |
+| Montée vers Chromium 156 | Atteinte |
 
 ## Licence
 
