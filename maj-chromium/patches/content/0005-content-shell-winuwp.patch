@@ -5934,10 +5934,10 @@ index 0000000000..c4baf13da7
 +#endif  // EXTENSIONS_RHENIUM_RHENIUM_PDF_H_
 diff --git a/extensions/rhenium/rhenium_tab_model.cc b/extensions/rhenium/rhenium_tab_model.cc
 new file mode 100644
-index 0000000000..c24d0061e1
+index 0000000000..d2bef8e130
 --- /dev/null
 +++ b/extensions/rhenium/rhenium_tab_model.cc
-@@ -0,0 +1,735 @@
+@@ -0,0 +1,757 @@
 +// Copyright 2026 Doalo
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -5953,6 +5953,7 @@ index 0000000000..c24d0061e1
 +#include "base/functional/bind.h"
 +#include "base/logging.h"
 +#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
 +#include "base/no_destructor.h"
 +#include "base/strings/string_number_conversions.h"
 +#include "base/strings/string_split.h"
@@ -6119,29 +6120,48 @@ index 0000000000..c24d0061e1
 +  }
 +
 + private:
++  bool WantsDesktop(const GURL& url) const {
++    const Tab* tab = FindTab(id_);
++    return (tab && tab->desktop) || IsWebStore(url);
++  }
++
 +  void DidStartNavigation(content::NavigationHandle* handle) override {
-+    ChooseUserAgent(handle);
++    if (handle->IsInPrimaryMainFrame())
++      handle->SetIsOverridingUserAgent(WantsDesktop(handle->GetURL()));
 +  }
 +
 +  // Une redirection peut mener au Web Store, par exemple depuis la page de
-+  // consentement aux cookies de Google (consent.google.com/save).
++  // consentement aux cookies de Google (consent.google.com/save). L'agent
++  // utilisateur ne se change que dans DidStartNavigation (sinon CHECK dans
++  // NavigationRequest) : la navigation est relancée à l'adresse de
++  // destination, une fois au plus par adresse.
 +  void DidRedirectNavigation(content::NavigationHandle* handle) override {
-+    ChooseUserAgent(handle);
-+  }
-+
-+  void ChooseUserAgent(content::NavigationHandle* handle) {
 +    if (!handle->IsInPrimaryMainFrame())
 +      return;
-+    const Tab* tab = FindTab(id_);
-+    handle->SetIsOverridingUserAgent((tab && tab->desktop) ||
-+                                     IsWebStore(handle->GetURL()));
++    const GURL& url = handle->GetURL();
++    if (WantsDesktop(url) == WantsDesktop(handle->GetRedirectChain().front()) ||
++        url == restarted_url_) {
++      return;
++    }
++    restarted_url_ = url;
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(&TabWatcher::Restart,
++                                  weak_factory_.GetWeakPtr(), url));
++  }
++
++  void Restart(const GURL& url) {
++    content::NavigationController::LoadURLParams params(url);
++    params.transition_type = ui::PAGE_TRANSITION_LINK;
++    web_contents()->GetController().LoadURLWithParams(params);
 +  }
 +
 +  void DidFinishNavigation(content::NavigationHandle* handle) override {
-+    if (handle->IsInPrimaryMainFrame() && handle->HasCommitted() &&
-+        !handle->IsErrorPage()) {
++    if (!handle->IsInPrimaryMainFrame())
++      return;
++    if (handle->HasCommitted())
++      restarted_url_ = GURL();
++    if (handle->HasCommitted() && !handle->IsErrorPage())
 +      Visit(web_contents()->GetController().GetLastCommittedEntry());
-+    }
 +  }
 +
 +  void TitleWasSet(content::NavigationEntry* entry) override {
@@ -6175,6 +6195,8 @@ index 0000000000..c24d0061e1
 +  }
 +
 +  const int id_;
++  GURL restarted_url_;
++  base::WeakPtrFactory<TabWatcher> weak_factory_{this};
 +};
 +
 +// Suit la fermeture de la page d'extension (bouton retour, window.close()).

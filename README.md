@@ -28,15 +28,19 @@ Ce qui manque encore : le rendu par le GPU (tout est dessiné par le processeur)
 
 ## Installer
 
-Il faut le mode développeur sur le téléphone (Paramètres, Mise à jour et sécurité, Pour les développeurs) et le Portail d'appareil activé dans le même écran.
+Il faut le mode développeur sur le téléphone (Paramètres, Mise à jour et sécurité, Pour les développeurs).
 
-1. Télécharger `RheniumShell_arm.appx` et `RheniumDev.cer` depuis la page Releases.
-2. Ouvrir dans un navigateur du PC l'adresse donnée par le Portail d'appareil.
-3. Dans Apps, choisir le paquet et le certificat, puis installer.
+Depuis le téléphone, sans PC :
 
-Toucher le `.appx` dans l'Explorateur de fichiers du téléphone installe l'app, mais elle plante au lancement.
+1. Mettre `RheniumShell_arm.appx` et `RheniumDev.cer`, pris sur la page Releases, dans le dossier Téléchargements du téléphone (téléchargés sur le téléphone, ou copiés par câble).
+2. Dans Fichiers, toucher `RheniumDev.cer` et l'installer. Une seule fois : le certificat ne change pas d'une version à l'autre.
+3. Toucher `RheniumShell_arm.appx`. L'installation se fait en arrière-plan, puis Rhénium apparaît dans la liste des applications.
+
+Avec un PC : activer aussi le Portail d'appareil (même écran), ouvrir dans un navigateur du PC l'adresse qu'il donne, puis dans Apps choisir le paquet et le certificat et installer.
 
 Une nouvelle version s'installe par-dessus l'ancienne sans effacer les données.
+
+Jusqu'à la 0.4.26313.135 comprise, Rhénium plantait au premier lancement, quelle que soit la façon de l'installer : la page d'accueil d'un profil neuf redirige, et l'agent utilisateur était changé pendant cette redirection, ce que Chromium refuse.
 
 ## Compiler
 
