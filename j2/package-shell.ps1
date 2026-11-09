@@ -12,7 +12,10 @@
 param(
   [string] $OutDir = "$PSScriptRoot\..\chromium\src\out\content-arm",
   [string] $UbolDir = "$PSScriptRoot\..\j4\out\ubol\uBOLite",
-  [string] $PdfjsDir = "$PSScriptRoot\..\j5\out\pdfjs\PdfViewer"
+  [string] $PdfjsDir = "$PSScriptRoot\..\j5\out\pdfjs\PdfViewer",
+  # Dossier du certificat de signature : celui du dépôt de travail pour la construction
+  # automatique, qui part d'une copie neuve (sinon un nouveau certificat serait créé).
+  [string] $CertDir = "$PSScriptRoot\..\sonde\certs"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,7 +32,7 @@ function Invoke-Tool {
 
 $sdkBin = (Get-ChildItem "$kits\bin" -Directory | Where-Object { Test-Path "$($_.FullName)\x64\makeappx.exe" } |
   Sort-Object { [version]$_.Name } | Select-Object -Last 1).FullName + '\x64'
-$pfx = & "$PSScriptRoot\..\sonde\dev-cert.ps1"
+$pfx = & "$PSScriptRoot\..\sonde\dev-cert.ps1" -Dir $CertDir
 
 $out = "$PSScriptRoot\out"
 $pkg = "$out\pkg"

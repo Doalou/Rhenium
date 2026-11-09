@@ -1,0 +1,11 @@
+Rhénium @VERSION@, Chromium @CHROMIUM@, pour Windows 10 Mobile (ARM32).
+
+Installer
+
+Il faut le mode développeur sur le téléphone (Paramètres, Mise à jour et sécurité, Pour les développeurs) et le Portail d'appareil activé dans le même écran.
+
+1. Télécharger RheniumShell_arm.appx et RheniumDev.cer.
+2. Ouvrir dans un navigateur du PC l'adresse donnée par le Portail d'appareil.
+3. Dans Apps, choisir le paquet et le certificat, puis installer.
+
+Une nouvelle version s'installe par-dessus l'ancienne sans effacer les données. Le certificat ne change pas d'une version à l'autre.

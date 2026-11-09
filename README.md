@@ -72,6 +72,8 @@ Récupérer les sources, une seule fois :
 
 `ninja-loop.ps1 -Build` lance `maj-chromium\build-content.ps1` (correctifs, gn, ninja) et récupère les fichiers que la compilation réclame encore. Le paquet est signé par un certificat de développement créé au premier empaquetage dans `sonde\certs`. La note `maj-chromium\README.md` détaille la montée de la 116 à la 156.
 
+Les Releases sont construites par le workflow `.github/workflows/paquet.yml`, sur le PC de développement, depuis un dépôt de travail privé : un tag `v*` compile, empaquette, copie le code dans le dépôt public et y publie l'appx, le certificat et la notice d'installation. Mise en place et précautions : `ci\README.md`.
+
 ## Comment c'est fait
 
 Chromium n'a jamais tourné ni sur Windows ARM32 ni en app UWP. Rhénium suit Chromium 156.0.8078.88 (canal Extended), après une première version sur la 116.0.5845.228, et ajoute une cible `target_os="winuwp"`, `target_cpu="arm"`.

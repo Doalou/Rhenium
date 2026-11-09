@@ -1,0 +1,63 @@
+# Construit l'app Rhénium (Chromium 156) sur le PC de développement, par un runner
+# auto-hébergé : le build complet demande des centaines d'heures de CPU, hors de portée
+# des runners de GitHub. Le workflow ne tourne que dans le dépôt privé : sa copie dans le
+# dépôt public ne fait rien, si bien qu'aucun code extérieur n'atteint le runner.
+# Un tag v* copie main et le tag dans le dépôt public et y publie la Release ; un
+# lancement à la main garde seulement le paquet dans l'exécution. Mise en place : ci/README.md.
+name: Paquet Rhénium
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Un seul build à la fois : l'arbre F:\Rhenium\chromium-next et son dossier de sortie
+# sont partagés.
+concurrency:
+  group: rhenium-chromium-next
+  cancel-in-progress: false
+
+jobs:
+  paquet:
+    if: github.event.repository.private
+    runs-on: [self-hosted, windows, rhenium]
+    timeout-minutes: 2880
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RHENIUM_ROOT: F:\Rhenium
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Historique complet pour la copie dans le dépôt public ; pas d'identifiants
+          # gardés, sinon le jeton du dépôt privé passerait avant celui du dépôt public.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Compiler et empaqueter
+        run: ./ci/paquet.ps1 -Root $env:RHENIUM_ROOT -Dest "$env:RUNNER_TEMP\rhenium"
+
+      - name: Garder le paquet dans l'exécution
+        uses: actions/upload-artifact@v4
+        with:
+          name: Rhenium-${{ github.ref_name }}
+          path: ${{ runner.temp }}\rhenium\*
+          retention-days: 30
+
+      - name: Copier le code dans le dépôt public
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GITHUB_TOKEN: ${{ secrets.RHENIUM_PUBLIC_TOKEN }}
+          PUBLIC_REPO: ${{ vars.RHENIUM_PUBLIC_REPO }}
+        run: ./ci/miroir.ps1 -Tag $env:GITHUB_REF_NAME -Repo $env:PUBLIC_REPO
+
+      - name: Publier la Release dans le dépôt public
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GITHUB_TOKEN: ${{ secrets.RHENIUM_PUBLIC_TOKEN }}
+          PUBLIC_REPO: ${{ vars.RHENIUM_PUBLIC_REPO }}
+        run: ./ci/publier.ps1 -Dir "$env:RUNNER_TEMP\rhenium" -Tag $env:GITHUB_REF_NAME -Repo $env:PUBLIC_REPO
